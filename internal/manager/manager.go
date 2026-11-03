@@ -20,6 +20,7 @@ import (
 	"github.com/cinvymoe/dshpm/internal/model"
 	"github.com/cinvymoe/dshpm/internal/profile"
 	"github.com/cinvymoe/dshpm/internal/remote"
+	"github.com/cinvymoe/dshpm/internal/version"
 )
 
 // Manager coordinates one profile and its remote metadata.
@@ -228,7 +229,7 @@ func (m *Manager) Update(ctx context.Context, options UpdateOptions) ([]UpdateRe
 		manifest, dir, err := backup.Create(backup.CreateOptions{
 			Profile:     m.Profile,
 			BackupDir:   options.BackupDir,
-			ToolVersion: "dshpm",
+			ToolVersion: version.Version,
 			Now:         time.Now(),
 		})
 		_ = manifest
