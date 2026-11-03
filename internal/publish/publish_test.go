@@ -131,3 +131,45 @@ func TestPublishDryRun(t *testing.T) {
 		t.Fatalf("dry run created .git: %v", err)
 	}
 }
+
+func TestPublishExistingGitRepository(t *testing.T) {
+	t.Setenv("GIT_AUTHOR_NAME", "dshpm test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "dshpm@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "dshpm test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "dshpm@example.com")
+	root := t.TempDir()
+	plugin := filepath.Join(root, "plugin")
+	if err := os.MkdirAll(plugin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "package.json"), []byte(`{"name":"demo","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(root, "remote.git")
+	runTest(t, root, "init", "--bare", bare)
+	runTest(t, plugin, "init", "-b", "main")
+	runTest(t, plugin, "add", "-A")
+	runTest(t, plugin, "commit", "-m", "initial")
+	runTest(t, plugin, "remote", "add", "origin", bare)
+	result, err := Publish(context.Background(), Options{
+		Dir:        plugin,
+		Repo:       "cinvymoe/demo",
+		Visibility: "private",
+		Branch:     "main",
+		GH:         fakeGH(t),
+		Git:        "git",
+		repoURL:    bare,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "published" || result.Remote != "origin" {
+		t.Fatalf("result = %+v", result)
+	}
+	if remote := runTest(t, plugin, "remote", "get-url", "origin"); remote != bare {
+		t.Fatalf("origin = %q, want %q", remote, bare)
+	}
+	if log := runTest(t, bare, "log", "--oneline", "main"); !strings.Contains(log, result.Commit[:7]) {
+		t.Fatalf("bare log = %q", log)
+	}
+}

@@ -121,7 +121,7 @@ func Publish(ctx context.Context, options Options) (*Result, error) {
 	if _, err := run(ctx, options.Dir, options.Git, "add", "-A"); err != nil {
 		return nil, err
 	}
-	if err := checkStaged(options.Dir, options.Git, options.Force); err != nil {
+	if err := checkStaged(ctx, options.Dir, options.Git, options.Force); err != nil {
 		return nil, err
 	}
 	status, err := run(ctx, options.Dir, options.Git, "status", "--porcelain")
@@ -255,8 +255,8 @@ func ensureGitignore(dir string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-func checkStaged(dir, git string, force bool) error {
-	output, err := run(context.Background(), dir, git, "diff", "--cached", "--name-only", "-z")
+func checkStaged(ctx context.Context, dir, git string, force bool) error {
+	output, err := run(ctx, dir, git, "diff", "--cached", "--name-only", "-z")
 	if err != nil {
 		return err
 	}
