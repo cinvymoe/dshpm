@@ -121,6 +121,9 @@ func Publish(ctx context.Context, options Options) (*Result, error) {
 	if _, err := run(ctx, options.Dir, options.Git, "add", "-A"); err != nil {
 		return nil, err
 	}
+	if err := stageBuildOutputs(ctx, options.Dir, options.Git); err != nil {
+		return nil, err
+	}
 	if err := checkStaged(ctx, options.Dir, options.Git, options.Force); err != nil {
 		return nil, err
 	}
@@ -253,6 +256,28 @@ func ensureGitignore(dir string) error {
 	}
 	content := "node_modules/\ndist/\n*.tgz\n*.tsbuildinfo\n.DS_Store\n"
 	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// stageBuildOutputs force-adds common compiled output directories. Plugin
+// repositories often ignore lib/ or dist/ even though GitHub installs consume
+// the built entrypoints directly.
+func stageBuildOutputs(ctx context.Context, dir, git string) error {
+	for _, name := range []string{"lib", "dist"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if _, err := run(ctx, dir, git, "add", "-f", name); err != nil {
+			return fmt.Errorf("stage build output %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func checkStaged(ctx context.Context, dir, git string, force bool) error {

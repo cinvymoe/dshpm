@@ -173,3 +173,41 @@ func TestPublishExistingGitRepository(t *testing.T) {
 		t.Fatalf("bare log = %q", log)
 	}
 }
+
+func TestPublishIncludesIgnoredBuildOutput(t *testing.T) {
+	t.Setenv("GIT_AUTHOR_NAME", "dshpm test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "dshpm@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "dshpm test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "dshpm@example.com")
+	root := t.TempDir()
+	plugin := filepath.Join(root, "plugin")
+	if err := os.MkdirAll(filepath.Join(plugin, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "package.json"), []byte(`{"name":"@dsh-external/dsh-demo","version":"1.2.3","main":"./lib/index.js"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, ".gitignore"), []byte("node_modules/\nlib/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "lib", "index.js"), []byte("export {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(root, "remote.git")
+	runTest(t, root, "init", "--bare", bare)
+	if _, err := Publish(context.Background(), Options{
+		Dir:        plugin,
+		Repo:       "cinvymoe/dsh-demo",
+		Visibility: "private",
+		Branch:     "main",
+		Git:        "git",
+		GH:         fakeGH(t),
+		repoURL:    bare,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	files := runTest(t, bare, "ls-tree", "-r", "--name-only", "main")
+	if !strings.Contains(files, "lib/index.js") {
+		t.Fatalf("published tree does not include ignored build output: %s", files)
+	}
+}
