@@ -5,6 +5,7 @@
 - **区分本地版本和远程版本**：同时显示本地已安装版本 / 本地 checkout 的 commit，以及 npm registry 或 git 上游的最新版本。
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
 - **同步更新**：npm 插件通过 pnpm 升级；git 依赖重新解析上游；本地 checkout 在保留未提交改动的前提下快进到上游。
+- **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
 
 > 参考 [clidot](https://github.com/cinvymoe/clidot) 的思路：一个可被 clidot 纳管的独立 CLI 工具，而不是一个 DSH 插件。
@@ -16,7 +17,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.1.0" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.2.0" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -42,6 +43,13 @@ dshpm update dsh-context @indexyz/dsh-autocompact
 
 # 更新所有有更新的插件（会先自动备份）
 dshpm update --all
+
+# 卸载插件：移除 profile 依赖、bundle 与 cordis.patch 引用，保留本地源码
+dshpm uninstall dsh-context
+
+# 查看历史备份，并把最近一次备份还原成计划
+dshpm history
+dshpm rollback --apply
 
 # 查看环境
 dshpm doctor
@@ -93,6 +101,42 @@ dshpm restore ~/.config/dshpm/backups/20261103-120000-web --apply
 dshpm restore <backup> --apply --force
 ```
 
+## 卸载插件
+
+```sh
+# 只显示将要卸载什么，不修改文件
+dshpm uninstall dsh-context --dry-run
+
+# 卸载一个或多个插件；默认先备份
+dshpm uninstall dsh-context @indexyz/dsh-autocompact
+
+# 跳过卸载前备份（不推荐）
+dshpm uninstall dsh-context --no-backup
+```
+
+卸载会调用 `pnpm remove`，然后清理 profile 的 `package.json` 中 `dsh.profile.bundles` 条目，以及 `cordis.patch.yml` 中引用该插件的顶层 `- insert:` 块。**本地源码目录不会被删除**，之后可以重新安装或手动删除。卸载完成的插件需要重启 DSH 才会从运行时消失。
+
+## 历史与回滚
+
+`dshpm history` 默认只列当前 profile 的备份；`--all` 查看所有 profile，`--limit N` 控制条数，`--json` 输出机器可读结果。
+
+```sh
+# 查看历史
+dshpm history
+
+# 默认选择最新备份，先输出计划
+dshpm rollback
+
+# 还原指定的历史备份（完整 ID 或唯一前缀）
+dshpm rollback 20261103-120000-web --apply
+
+# 还原后不执行 pnpm install；或覆盖 checkout 的未提交改动
+dshpm rollback <id> --apply --no-install
+dshpm rollback <id> --apply --force
+```
+
+回滚会先为当前状态创建一个 checkpoint 备份（`--no-backup` 可关闭），再恢复目标备份的 profile 文件、本地 patch 与非 git 插件源码。除非指定 `--no-install`，随后会运行 `pnpm install --frozen-lockfile` 物化依赖。若 patch 贴回发生冲突，命令以退出码 `1` 结束并列出冲突文件，不再继续安装。
+
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
@@ -132,6 +176,9 @@ dshpm restore <backup> --apply --force
 | `dshpm list` / `status` | 插件清单、本地/远程版本、变更状态 |
 | `dshpm backup` | 备份 profile 文件与本地插件 patch |
 | `dshpm restore <dir>` | 恢复备份（默认只做计划） |
+| `dshpm uninstall <name...>` / `remove` | 卸载插件并清理 profile 引用，保留本地源码 |
+| `dshpm history` | 列出历史备份 |
+| `dshpm rollback [id]` | 还原历史备份（默认只做计划） |
 | `dshpm update <name...>` / `--all` | 更新插件；`--dry-run` 只做计划 |
 | `dshpm profiles` | 列出 profile 与依赖数量 |
 | `dshpm doctor` | 检查 DSH 目录、git、pnpm |

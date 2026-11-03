@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -317,4 +318,95 @@ func copyTree(source, destination string) (int, error) {
 func safeName(name string) string {
 	replacer := strings.NewReplacer("/", "_", "\\", "_", "@", "_", ":", "_")
 	return replacer.Replace(name)
+}
+
+// Entry is one stored backup.
+type Entry struct {
+	ID       string                `json:"id"`
+	Path     string                `json:"path"`
+	Manifest *model.BackupManifest `json:"manifest"`
+}
+
+// List returns backups under root, newest first. An empty profile includes
+// every profile; an empty root returns no entries.
+func List(root, profile string) ([]Entry, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read backup directory %s: %w", root, err)
+	}
+	result := make([]Entry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		manifest, err := ReadManifest(dir)
+		if err != nil {
+			continue
+		}
+		if profile != "" && manifest.Profile != profile {
+			continue
+		}
+		result = append(result, Entry{ID: entry.Name(), Path: dir, Manifest: manifest})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := result[i].Manifest.CreatedAt
+		right := result[j].Manifest.CreatedAt
+		if left == right {
+			return result[i].ID > result[j].ID
+		}
+		return left > right
+	})
+	return result, nil
+}
+
+// Latest returns the newest backup for a profile.
+func Latest(root, profile string) (*Entry, error) {
+	entries, err := List(root, profile)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no backup found for profile %s under %s", profile, root)
+	}
+	return &entries[0], nil
+}
+
+// Find resolves a backup by archive path, full id, or unique id prefix.
+func Find(root, profile, reference string) (*Entry, error) {
+	if info, err := os.Stat(reference); err == nil && info.IsDir() {
+		manifest, err := ReadManifest(reference)
+		if err != nil {
+			return nil, err
+		}
+		return &Entry{ID: filepath.Base(reference), Path: reference, Manifest: manifest}, nil
+	}
+	entries, err := List(root, profile)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.ID == reference {
+			copy := entry
+			return &copy, nil
+		}
+	}
+	var matches []Entry
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.ID, reference) {
+			matches = append(matches, entry)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("backup %q not found for profile %s", reference, profile)
+	case 1:
+		copy := matches[0]
+		return &copy, nil
+	default:
+		return nil, fmt.Errorf("backup id %q is ambiguous; use a full id", reference)
+	}
 }

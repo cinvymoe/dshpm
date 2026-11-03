@@ -30,6 +30,10 @@ Commands:
   status               Alias for list
   backup               Back up profile manifests and local plugin patches
   restore <archive>    Restore a backup (plan only unless --apply)
+  uninstall <names...> Remove plugins from the profile (keeps local sources)
+  remove               Alias for uninstall
+  history              List backups for the selected profile
+  rollback [id|path]   Restore a historical backup (plan unless --apply)
   update [names...]    Update plugins from their remote source
   sync                 Alias for update
   profiles             List DSH profiles and dependency counts
@@ -67,6 +71,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runBackup(rest, stdout, stderr)
 	case "restore":
 		return runRestore(rest, stdout, stderr)
+	case "uninstall", "remove":
+		return runUninstall(rest, stdout, stderr)
+	case "history":
+		return runHistory(rest, stdout, stderr)
+	case "rollback":
+		return runRollback(rest, stdout, stderr)
 	case "update", "sync":
 		return runUpdate(rest, stdout, stderr)
 	case "profiles":
@@ -563,4 +573,229 @@ func writeJSON(writer io.Writer, value any) {
 		return
 	}
 	fmt.Fprintln(writer, string(data))
+}
+
+func runUninstall(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	dryRun := set.Bool("dry-run", false, "plan only")
+	noBackup := set.Bool("no-backup", false, "skip the pre-uninstall backup")
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true})
+	if err != nil {
+		return 2
+	}
+	if len(positionals) == 0 {
+		fmt.Fprintln(stderr, "dshpm uninstall: at least one plugin name is required")
+		return 2
+	}
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	results, err := instance.Uninstall(context.Background(), manager.UninstallOptions{
+		Names:     positionals,
+		DryRun:    *dryRun,
+		NoBackup:  *noBackup,
+		BackupDir: instance.Config.BackupDir,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	if options.json {
+		writeJSON(stdout, results)
+		return 0
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+	fmt.Fprintln(writer, "PLUGIN\tKIND\tRESULT")
+	for _, result := range results {
+		fmt.Fprintf(writer, "%s\t%s\t%s\n", result.Name, result.Kind, result.Status)
+	}
+	_ = writer.Flush()
+	if len(results) > 0 && results[0].BackupPath != "" {
+		fmt.Fprintf(stdout, "\nBackup: %s\n", results[0].BackupPath)
+	}
+	if *dryRun {
+		fmt.Fprintln(stdout, "\nDry run: no files were changed.")
+	} else {
+		if *noBackup {
+			fmt.Fprintln(stdout, "\nWarning: pre-uninstall backup was skipped.")
+		}
+		fmt.Fprintln(stdout, "Local source directories were kept. Restart DSH to unload the plugins.")
+	}
+	return 0
+}
+
+func runHistory(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("history", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	all := set.Bool("all", false, "include every profile")
+	limit := set.Int("limit", 20, "maximum entries to show")
+	if err := set.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := loadConfig(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	profileName := ""
+	if !*all {
+		profileName, err = cfg.ResolveProfileName(options.profile)
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm: %v\n", err)
+			return 1
+		}
+	}
+	entries, err := backup.List(cfg.BackupDir, profileName)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	if *limit > 0 && len(entries) > *limit {
+		entries = entries[:*limit]
+	}
+	if options.json {
+		writeJSON(stdout, entries)
+		return 0
+	}
+	if len(entries) == 0 {
+		if *all {
+			fmt.Fprintln(stdout, "No backups found.")
+		} else {
+			fmt.Fprintf(stdout, "No backups found for profile %s.\n", profileName)
+		}
+		return 0
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+	fmt.Fprintln(writer, "ID\tCREATED\tPROFILE\tFILES\tPLUGINS\tPATCHES")
+	for _, entry := range entries {
+		patches := 0
+		for _, plugin := range entry.Manifest.Plugins {
+			if plugin.PatchFile != "" {
+				patches++
+			}
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%d\t%d\n",
+			entry.ID,
+			entry.Manifest.CreatedAt,
+			entry.Manifest.Profile,
+			len(entry.Manifest.Files),
+			len(entry.Manifest.Plugins),
+			patches,
+		)
+	}
+	_ = writer.Flush()
+	return 0
+}
+
+func runRollback(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	apply := set.Bool("apply", false, "apply the restore")
+	force := set.Bool("force", false, "overwrite local changes")
+	noInstall := set.Bool("no-install", false, "skip pnpm install after restoring")
+	noBackup := set.Bool("no-backup", false, "skip the checkpoint backup")
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true})
+	if err != nil {
+		return 2
+	}
+	if len(positionals) > 1 {
+		fmt.Fprintln(stderr, "dshpm rollback: at most one backup id or path is allowed")
+		return 2
+	}
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	var entry *backup.Entry
+	if len(positionals) == 0 {
+		entry, err = backup.Latest(instance.Config.BackupDir, instance.Profile.Name)
+	} else {
+		entry, err = backup.Find(instance.Config.BackupDir, instance.Profile.Name, positionals[0])
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	if entry.Manifest.Profile != instance.Profile.Name {
+		fmt.Fprintf(stderr, "dshpm: backup belongs to profile %s, not %s\n", entry.Manifest.Profile, instance.Profile.Name)
+		return 1
+	}
+	if !*apply {
+		result, err := backup.Restore(backup.RestoreOptions{ArchiveDir: entry.Path, Apply: false})
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "PLAN (pass --apply to roll back) %s\n", entry.ID)
+		fmt.Fprintf(stdout, "Profile: %s\n", result.Manifest.Profile)
+		if len(result.AppliedPatches) > 0 {
+			fmt.Fprintf(stdout, "Patches: %s\n", strings.Join(result.AppliedPatches, ", "))
+		}
+		if len(result.RestoredCheckouts) > 0 {
+			fmt.Fprintf(stdout, "Plugin files: %s\n", strings.Join(result.RestoredCheckouts, ", "))
+		}
+		return 0
+	}
+
+	checkpoint := ""
+	if !*noBackup {
+		_, dir, err := backup.Create(backup.CreateOptions{
+			Profile:     instance.Profile,
+			BackupDir:   instance.Config.BackupDir,
+			ToolVersion: version.Version,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm: checkpoint backup failed: %v\n", err)
+			return 1
+		}
+		checkpoint = dir
+	}
+	result, err := backup.Restore(backup.RestoreOptions{
+		ArchiveDir:       entry.Path,
+		Apply:            true,
+		Force:            *force,
+		Out:              stdout,
+		TargetProfileDir: instance.Profile.Dir,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "RESTORED %s\n", entry.ID)
+	fmt.Fprintf(stdout, "Profile: %s\n", result.Manifest.Profile)
+	if len(result.RestoredFiles) > 0 {
+		fmt.Fprintf(stdout, "Files: %s\n", strings.Join(result.RestoredFiles, ", "))
+	}
+	if len(result.AppliedPatches) > 0 {
+		fmt.Fprintf(stdout, "Patches: %s\n", strings.Join(result.AppliedPatches, ", "))
+	}
+	if len(result.RestoredCheckouts) > 0 {
+		fmt.Fprintf(stdout, "Plugin files: %s\n", strings.Join(result.RestoredCheckouts, ", "))
+	}
+	if len(result.Conflicts) > 0 {
+		fmt.Fprintf(stdout, "Conflicts: %s\n", strings.Join(result.Conflicts, ", "))
+		return 1
+	}
+	if checkpoint != "" {
+		fmt.Fprintf(stdout, "Checkpoint: %s\n", checkpoint)
+	}
+	if !*noInstall {
+		if err := instance.Install(context.Background()); err != nil {
+			fmt.Fprintf(stderr, "dshpm: install restored dependencies: %v\n", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, "Dependencies installed.")
+	}
+	fmt.Fprintln(stdout, "Restart DSH to apply the restored state.")
+	return 0
 }
