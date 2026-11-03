@@ -88,7 +88,22 @@ func Create(options CreateOptions) (*model.BackupManifest, string, error) {
 
 	pluginsDir := filepath.Join(dir, "plugins")
 	for _, plugin := range options.Profile.Plugins() {
-		if plugin.Kind != model.SourceLocal || plugin.LocalDir == "" || !gitutil.IsRepository(plugin.LocalDir) {
+		if plugin.Kind != model.SourceLocal || plugin.LocalDir == "" {
+			continue
+		}
+		if !gitutil.IsRepository(plugin.LocalDir) {
+			relative := filepath.ToSlash(filepath.Join("plugins", safeName(plugin.Name), "files"))
+			size, err := copyTree(plugin.LocalDir, filepath.Join(dir, filepath.FromSlash(relative)))
+			if err != nil {
+				return nil, "", fmt.Errorf("copy files for %s: %w", plugin.Name, err)
+			}
+			manifest.Plugins = append(manifest.Plugins, model.BackupPlugin{
+				Name:      plugin.Name,
+				Dir:       plugin.LocalDir,
+				Version:   plugin.InstalledVersion,
+				FilesDir:  relative,
+				FilesSize: size,
+			})
 			continue
 		}
 		entry := model.BackupPlugin{
@@ -158,12 +173,13 @@ type RestoreOptions struct {
 
 // RestoreResult summarizes a restore.
 type RestoreResult struct {
-	Manifest       *model.BackupManifest
-	RestoredFiles  []string
-	AppliedPatches []string
-	Conflicts      []string
-	Skipped        []string
-	DryRun         bool
+	Manifest          *model.BackupManifest
+	RestoredFiles     []string
+	AppliedPatches    []string
+	RestoredCheckouts []string
+	Conflicts         []string
+	Skipped           []string
+	DryRun            bool
 }
 
 // Restore restores profile files and local patches. Without Apply it only
@@ -209,6 +225,21 @@ func Restore(options RestoreOptions) (*RestoreResult, error) {
 	}
 
 	for _, plugin := range manifest.Plugins {
+		if plugin.FilesDir != "" {
+			if !options.Apply {
+				result.RestoredCheckouts = append(result.RestoredCheckouts, plugin.Name)
+				continue
+			}
+			if _, err := os.Stat(plugin.Dir); err == nil && !options.Force {
+				result.Skipped = append(result.Skipped, plugin.Name+" (checkout exists; use --force)")
+				continue
+			}
+			if _, err := copyTree(filepath.Join(options.ArchiveDir, filepath.FromSlash(plugin.FilesDir)), plugin.Dir); err != nil {
+				return nil, fmt.Errorf("restore files for %s: %w", plugin.Name, err)
+			}
+			result.RestoredCheckouts = append(result.RestoredCheckouts, plugin.Name)
+			continue
+		}
 		if plugin.PatchFile == "" {
 			continue
 		}
@@ -235,6 +266,52 @@ func Restore(options RestoreOptions) (*RestoreResult, error) {
 		result.AppliedPatches = append(result.AppliedPatches, plugin.Name)
 	}
 	return result, nil
+}
+
+// copyTree copies regular files from source to destination. Git metadata and
+// node_modules are excluded because they are either rebuilt or not portable.
+func copyTree(source, destination string) (int, error) {
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		return 0, err
+	}
+	size := 0
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == source {
+			return nil
+		}
+		name := entry.Name()
+		if entry.IsDir() {
+			if name == ".git" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(destination, path[len(source)+1:]), 0o755)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative := path[len(source)+1:]
+		target := filepath.Join(destination, relative)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, info.Mode().Perm()); err != nil {
+			return err
+		}
+		size += len(data)
+		return nil
+	})
+	return size, err
 }
 
 func safeName(name string) string {

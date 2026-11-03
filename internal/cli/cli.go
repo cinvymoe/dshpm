@@ -316,6 +316,9 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 	if len(result.AppliedPatches) > 0 {
 		fmt.Fprintf(stdout, "Patches: %s\n", strings.Join(result.AppliedPatches, ", "))
 	}
+	if len(result.RestoredCheckouts) > 0 {
+		fmt.Fprintf(stdout, "Plugin files: %s\n", strings.Join(result.RestoredCheckouts, ", "))
+	}
 	if len(result.Skipped) > 0 {
 		fmt.Fprintf(stdout, "Skipped: %s\n", strings.Join(result.Skipped, ", "))
 	}

@@ -3,7 +3,7 @@
 `dshpm` 是一个独立的 Go 命令行工具，用来管理安装在一个 DeepSeek Harness（DSH）profile 里的插件：
 
 - **区分本地版本和远程版本**：同时显示本地已安装版本 / 本地 checkout 的 commit，以及 npm registry 或 git 上游的最新版本。
-- **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件，并把本地插件的未提交改动保存为 patch。
+- **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
 - **同步更新**：npm 插件通过 pnpm 升级；git 依赖重新解析上游；本地 checkout 在保留未提交改动的前提下快进到上游。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
 
@@ -74,8 +74,10 @@ dshpm doctor
 │   ├── cordis.patch.yml
 │   └── cordis.yml
 └── plugins/
-    └── _dsh-external_dsh-upgrade/
-        └── changes.patch    # git diff --binary HEAD（含未跟踪文件）
+    ├── _dsh-external_dsh-upgrade/
+    │   └── changes.patch    # git diff --binary HEAD（含未跟踪文件）
+    └── plain-plugin/
+        └── files/           # 非 git 本地插件的源码副本（不含 node_modules/.git）
 ```
 
 恢复：
@@ -87,7 +89,7 @@ dshpm restore ~/.config/dshpm/backups/20261103-120000-web
 # 实际恢复；已有 profile 文件会先保存到 .dshpm-restore-<时间>/
 dshpm restore ~/.config/dshpm/backups/20261103-120000-web --apply
 
-# 恢复本地 patch 时覆盖 checkout 现有未提交改动
+# 覆盖 checkout 现有未提交改动，或覆盖已存在的非 git 插件目录
 dshpm restore <backup> --apply --force
 ```
 

@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0
+VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w \
 	-X github.com/cinvymoe/dshpm/internal/version.Version=$(VERSION) \

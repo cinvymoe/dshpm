@@ -48,6 +48,8 @@ type BackupPlugin struct {
 	Dirty     int    `json:"dirty"`
 	PatchFile string `json:"patchFile,omitempty"`
 	PatchSize int    `json:"patchSize,omitempty"`
+	FilesDir  string `json:"filesDir,omitempty"`
+	FilesSize int    `json:"filesSize,omitempty"`
 }
 
 // BackupManifest describes a profile backup.
