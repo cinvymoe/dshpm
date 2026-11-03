@@ -1,5 +1,8 @@
 VERSION ?= 0.1.0
-LDFLAGS := -s -w -X github.com/cinvymoe/dshpm/internal/version.Version=$(VERSION)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+LDFLAGS := -s -w \
+	-X github.com/cinvymoe/dshpm/internal/version.Version=$(VERSION) \
+	-X github.com/cinvymoe/dshpm/internal/version.Commit=$(COMMIT)
 
 .PHONY: build test vet clean
 
