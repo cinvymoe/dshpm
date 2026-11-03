@@ -60,6 +60,75 @@ func Load(dshHome, name string) (*Profile, error) {
 	}, nil
 }
 
+// SetDependency replaces the spec of one declared dependency in
+// package.json and updates the in-memory dependency map. The file is written
+// atomically so a failed switch cannot leave a partially written manifest.
+func (p *Profile) SetDependency(name, spec string) error {
+	packagePath := filepath.Join(p.Dir, "package.json")
+	data, err := os.ReadFile(packagePath)
+	if err != nil {
+		return fmt.Errorf("read profile package.json: %w", err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("parse profile package.json: %w", err)
+	}
+	found := false
+	for _, section := range []string{"dependencies", "devDependencies"} {
+		raw, ok := root[section]
+		if !ok {
+			continue
+		}
+		var dependencies map[string]string
+		if err := json.Unmarshal(raw, &dependencies); err != nil {
+			return fmt.Errorf("parse %s: %w", section, err)
+		}
+		if _, ok := dependencies[name]; !ok {
+			continue
+		}
+		dependencies[name] = spec
+		encoded, err := json.Marshal(dependencies)
+		if err != nil {
+			return err
+		}
+		root[section] = encoded
+		found = true
+		break
+	}
+	if !found {
+		return fmt.Errorf("dependency %s is not declared in package.json", name)
+	}
+	updated, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	updated = append(updated, '\n')
+	temporary, err := os.CreateTemp(p.Dir, ".package.json.*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.Write(updated); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Chmod(0o644); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, packagePath); err != nil {
+		return err
+	}
+	if p.Dependencies != nil {
+		p.Dependencies[name] = spec
+	}
+	return nil
+}
+
 // Plugins returns one entry per declared dependency, enriched with locally
 // observable facts. Remote facts are intentionally not filled here.
 func (p *Profile) Plugins() []model.Plugin {

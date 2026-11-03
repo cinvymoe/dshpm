@@ -6,7 +6,7 @@
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
 - **同步更新**：npm 插件通过 pnpm 升级；git 依赖重新解析上游；本地 checkout 在保留未提交改动的前提下快进到上游。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
-- **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release。
+- **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release；发布成功后默认把 profile 依赖切到 `github:OWNER/REPO` 远程管理。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
 
 > 参考 [clidot](https://github.com/cinvymoe/clidot) 的思路：一个可被 clidot 纳管的独立 CLI 工具，而不是一个 DSH 插件。
@@ -18,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.3.0" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.4.0" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -150,7 +150,8 @@ dshpm rollback <id> --apply --force
 2. 缺少 `.gitignore` 时写入 `node_modules/`、`dist/` 等忽略规则（保留 `lib/` 构建产物，便于仓库直接安装）；
 3. 暂存并提交当前工作树（默认提交信息 `chore: publish via dshpm`）；
 4. 用 `gh repo create` 创建仓库（默认 private），添加 remote 并 push 当前分支；
-5. 可选 `--tag` 推送 `v<package version>`，`--release` 同时创建 GitHub Release。
+5. 可选 `--tag` 推送 `v<package version>`，`--release` 同时创建 GitHub Release；
+6. 默认把当前 profile 的依赖从 `link:` 改写为 `github:OWNER/REPO` 并执行 `pnpm install`，之后由远程仓库管理；失败时自动恢复原依赖。
 
 ```sh
 # 先看计划和目标仓库，不修改任何文件
@@ -179,8 +180,9 @@ dshpm publish --all-local --visibility private
 | `--tag` / `--release` | 打 tag；`--release` 还会创建 GitHub Release |
 | `--force` | 允许大文件或替换同名 remote |
 | `--no-backup` | 跳过发布前备份 |
+| `--no-switch` | 发布后保留本地 `link:` 依赖，不切换到远程仓库 |
 
-发布不会自动改写 profile 的依赖声明。发布后如果需要改为从 GitHub 安装，需要手动把依赖改成 `github:OWNER/REPO`（或先保留 `link:` 继续本地开发）。
+发布成功后默认切换为远程管理：profile 依赖会变成 `github:OWNER/REPO`，并执行一次 `pnpm install` 让本地 `node_modules` 改为远程 checkout。如果你还要继续本地开发，使用 `--no-switch`；`--dry-run` 只展示计划，不会改写依赖。
 
 ## 更新安全规则
 

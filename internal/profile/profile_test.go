@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,5 +96,50 @@ importers:
 	}
 	if _, exists := got["dsh-context7"]; exists {
 		t.Fatal("link dependency must not have a git commit")
+	}
+}
+
+func TestSetDependency(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "profiles", "web")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{
+		"name": "profile",
+		"dependencies": {"demo": "link:/tmp/demo", "other": "1.0.0"},
+		"dsh": {"profile": {"bundles": ["demo"]}}
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(home, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetDependency("demo", "github:owner/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if p.Dependencies["demo"] != "github:owner/repo" {
+		t.Fatalf("in-memory dependency = %q", p.Dependencies["demo"])
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Dependencies map[string]string `json:"dependencies"`
+		DSH          map[string]any    `json:"dsh"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.Dependencies["demo"] != "github:owner/repo" {
+		t.Fatalf("package.json = %s", data)
+	}
+	if document.Dependencies["other"] != "1.0.0" || document.DSH == nil {
+		t.Fatalf("unrelated data was lost: %s", data)
+	}
+	if err := p.SetDependency("missing", "1.0.0"); err == nil {
+		t.Fatal("expected an error for an undeclared dependency")
 	}
 }

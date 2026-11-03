@@ -806,8 +806,10 @@ func runRollback(args []string, stdout, stderr io.Writer) int {
 }
 
 type publishOutcome struct {
-	Result *publish.Result `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	Result      *publish.Result `json:"result,omitempty"`
+	Switch      string          `json:"switch,omitempty"`
+	SwitchError string          `json:"switchError,omitempty"`
+	Error       string          `json:"error,omitempty"`
 }
 
 func runPublish(args []string, stdout, stderr io.Writer) int {
@@ -827,6 +829,7 @@ func runPublish(args []string, stdout, stderr io.Writer) int {
 	dryRun := set.Bool("dry-run", false, "plan only")
 	force := set.Bool("force", false, "allow large files or remote replacement")
 	noBackup := set.Bool("no-backup", false, "skip the pre-publish backup")
+	noSwitch := set.Bool("no-switch", false, "keep the local link instead of switching to the published repository")
 	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "visibility": true, "repo": true, "owner": true, "branch": true, "remote": true, "message": true})
 	if err != nil {
 		return 2
@@ -885,19 +888,30 @@ func runPublish(args []string, stdout, stderr io.Writer) int {
 			exit = 1
 			continue
 		}
-		outcomes = append(outcomes, publishOutcome{Result: result})
+		outcome := publishOutcome{Result: result, Switch: "remote"}
+		if *noSwitch {
+			outcome.Switch = "kept-local"
+		} else if *dryRun {
+			outcome.Switch = "planned"
+		} else if err := instance.SwitchToGit(context.Background(), plugin.Name, result.Repo); err != nil {
+			outcome.Switch = "failed"
+			outcome.SwitchError = err.Error()
+			fmt.Fprintf(stderr, "dshpm: switch %s to remote: %v\n", plugin.Name, err)
+			exit = 1
+		}
+		outcomes = append(outcomes, outcome)
 	}
 	if options.json {
 		writeJSON(stdout, outcomes)
 		return exit
 	}
 	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-	fmt.Fprintln(writer, "PLUGIN\tREPO\tVISIBILITY\tSTATUS\tURL")
+	fmt.Fprintln(writer, "PLUGIN\tREPO\tVISIBILITY\tSTATUS\tSWITCH\tURL")
 	for _, outcome := range outcomes {
 		if outcome.Result == nil {
 			continue
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", outcome.Result.Plugin, outcome.Result.Repo, outcome.Result.Visibility, outcome.Result.Status, outcome.Result.URL)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", outcome.Result.Plugin, outcome.Result.Repo, outcome.Result.Visibility, outcome.Result.Status, outcome.Switch, outcome.Result.URL)
 	}
 	_ = writer.Flush()
 	if *dryRun {
