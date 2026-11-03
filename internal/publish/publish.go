@@ -251,7 +251,7 @@ func ensureGitignore(dir string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	content := "node_modules/\nlib/\ndist/\n*.tgz\n*.tsbuildinfo\n.DS_Store\n"
+	content := "node_modules/\ndist/\n*.tgz\n*.tsbuildinfo\n.DS_Store\n"
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 

@@ -147,7 +147,7 @@ dshpm rollback <id> --apply --force
 `publish` 只接受 `link:` / `file:` / `workspace:` 的本地插件，并且要求已登录 `gh auth login`。它会：
 
 1. 在插件目录执行 `git init`（如果还不是 Git 仓库）；
-2. 缺少 `.gitignore` 时写入 `node_modules/`、`lib/`、`dist/` 等忽略规则；
+2. 缺少 `.gitignore` 时写入 `node_modules/`、`dist/` 等忽略规则（保留 `lib/` 构建产物，便于仓库直接安装）；
 3. 暂存并提交当前工作树（默认提交信息 `chore: publish via dshpm`）；
 4. 用 `gh repo create` 创建仓库（默认 private），添加 remote 并 push 当前分支；
 5. 可选 `--tag` 推送 `v<package version>`，`--release` 同时创建 GitHub Release。
