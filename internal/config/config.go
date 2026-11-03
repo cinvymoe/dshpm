@@ -19,6 +19,7 @@ type Config struct {
 	PNPMRegistry   string `json:"pnpmRegistry,omitempty"`
 	PNPM           string `json:"pnpm,omitempty"`
 	Git            string `json:"git,omitempty"`
+	GH             string `json:"gh,omitempty"`
 }
 
 // Resolved is a Config with empty values replaced by defaults and paths
@@ -67,6 +68,9 @@ func LoadFile(configPath string) (Resolved, error) {
 	}
 	if cfg.Git == "" {
 		cfg.Git = "git"
+	}
+	if cfg.GH == "" {
+		cfg.GH = "gh"
 	}
 	cfg.DSHHome = expandPath(cfg.DSHHome, home)
 	cfg.BackupDir = expandPath(cfg.BackupDir, home)

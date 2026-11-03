@@ -6,6 +6,7 @@
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
 - **同步更新**：npm 插件通过 pnpm 升级；git 依赖重新解析上游；本地 checkout 在保留未提交改动的前提下快进到上游。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
+- **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
 
 > 参考 [clidot](https://github.com/cinvymoe/clidot) 的思路：一个可被 clidot 纳管的独立 CLI 工具，而不是一个 DSH 插件。
@@ -17,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.2.0" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.3.0" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -50,6 +51,10 @@ dshpm uninstall dsh-context
 # 查看历史备份，并把最近一次备份还原成计划
 dshpm history
 dshpm rollback --apply
+
+# 发布一个本地插件到 GitHub（默认 private；--public 用 --visibility public）
+dshpm publish dsh-message-model-badge --dry-run
+dshpm publish dsh-message-model-badge
 
 # 查看环境
 dshpm doctor
@@ -137,6 +142,46 @@ dshpm rollback <id> --apply --force
 
 回滚会先为当前状态创建一个 checkpoint 备份（`--no-backup` 可关闭），再恢复目标备份的 profile 文件、本地 patch 与非 git 插件源码。除非指定 `--no-install`，随后会运行 `pnpm install --frozen-lockfile` 物化依赖。若 patch 贴回发生冲突，命令以退出码 `1` 结束并列出冲突文件，不再继续安装。
 
+## 发布本地插件
+
+`publish` 只接受 `link:` / `file:` / `workspace:` 的本地插件。它会：
+
+1. 在插件目录执行 `git init`（如果还不是 Git 仓库）；
+2. 缺少 `.gitignore` 时写入 `node_modules/`、`lib/`、`dist/` 等忽略规则；
+3. 暂存并提交当前工作树（默认提交信息 `chore: publish via dshpm`）；
+4. 用 `gh repo create` 创建仓库（默认 private），添加 remote 并 push 当前分支；
+5. 可选 `--tag` 推送 `v<package version>`，`--release` 同时创建 GitHub Release。
+
+```sh
+# 先看计划和目标仓库，不修改任何文件
+dshpm publish dsh-message-model-badge --dry-run
+
+# 发布为私有仓库
+dshpm publish dsh-message-model-badge
+
+# 发布为公开仓库，并创建 v0.1.0 Release
+dshpm publish dsh-message-model-badge --visibility public --release
+
+# 发布全部本地插件（每个插件一个仓库）
+dshpm publish --all-local --visibility private
+```
+
+常用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--visibility private\|public\|internal` | 仓库可见性，默认 `private` |
+| `--repo OWNER/NAME` | 指定仓库名，只能用于单个插件 |
+| `--owner OWNER` | 指定 GitHub 账号/组织；默认取 `gh api user` |
+| `--branch NAME` | 推送分支，默认 `main` |
+| `--remote NAME` | 指定 remote；默认优先 `origin`，已存在其他 remote 时用 `dshpm` |
+| `--message TEXT` | 覆盖提交信息 |
+| `--tag` / `--release` | 打 tag；`--release` 还会创建 GitHub Release |
+| `--force` | 允许大文件或替换同名 remote |
+| `--no-backup` | 跳过发布前备份 |
+
+发布不会自动改写 profile 的依赖声明。发布后如果需要改为从 GitHub 安装，需要手动把依赖改成 `github:OWNER/REPO`（或先保留 `link:` 继续本地开发）。
+
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
@@ -149,7 +194,7 @@ dshpm rollback <id> --apply --force
    - 快进后重新贴回 patch；冲突时停在上游并报告冲突文件，不改写远端；
    - 若配置了 `build` 脚本则执行构建，构建失败自动回滚到更新前状态。
 4. 本地提交（ahead）不会被自动丢弃；需要手动处理后再更新。
-5. 不执行 `git commit`、`git push`，也不删除远端分支。
+5. 更新流程不执行 `git commit`、`git push`，也不删除远端分支；只有显式 `dshpm publish` 会提交并推送本地插件仓库。
 
 ## 配置
 
@@ -163,7 +208,8 @@ dshpm rollback <id> --apply --force
   "npmRegistry": "https://registry.npmjs.org",
   "pnpmRegistry": "https://registry.npmjs.org",
   "pnpm": "pnpm",
-  "git": "git"
+  "git": "git",
+  "gh": "gh"
 }
 ```
 
@@ -179,6 +225,7 @@ dshpm rollback <id> --apply --force
 | `dshpm uninstall <name...>` / `remove` | 卸载插件并清理 profile 引用，保留本地源码 |
 | `dshpm history` | 列出历史备份 |
 | `dshpm rollback [id]` | 还原历史备份（默认只做计划） |
+| `dshpm publish <name...>` / `--all-local` | 通过 gh 发布本地插件；`--dry-run` 只做计划 |
 | `dshpm update <name...>` / `--all` | 更新插件；`--dry-run` 只做计划 |
 | `dshpm profiles` | 列出 profile 与依赖数量 |
 | `dshpm doctor` | 检查 DSH 目录、git、pnpm |

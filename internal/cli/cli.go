@@ -17,6 +17,7 @@ import (
 	"github.com/cinvymoe/dshpm/internal/config"
 	"github.com/cinvymoe/dshpm/internal/manager"
 	"github.com/cinvymoe/dshpm/internal/model"
+	"github.com/cinvymoe/dshpm/internal/publish"
 	"github.com/cinvymoe/dshpm/internal/version"
 )
 
@@ -34,6 +35,7 @@ Commands:
   remove               Alias for uninstall
   history              List backups for the selected profile
   rollback [id|path]   Restore a historical backup (plan unless --apply)
+  publish [names...]   Publish local plugins to GitHub through gh
   update [names...]    Update plugins from their remote source
   sync                 Alias for update
   profiles             List DSH profiles and dependency counts
@@ -77,6 +79,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runHistory(rest, stdout, stderr)
 	case "rollback":
 		return runRollback(rest, stdout, stderr)
+	case "publish":
+		return runPublish(rest, stdout, stderr)
 	case "update", "sync":
 		return runUpdate(rest, stdout, stderr)
 	case "profiles":
@@ -556,6 +560,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		NPMRegistry:    "https://registry.npmjs.org",
 		PNPM:           "pnpm",
 		Git:            "git",
+		GH:             "gh",
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
@@ -798,4 +803,142 @@ func runRollback(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "Restart DSH to apply the restored state.")
 	return 0
+}
+
+type publishOutcome struct {
+	Result *publish.Result `json:"result,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+func runPublish(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("publish", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	allLocal := set.Bool("all-local", false, "publish every local plugin")
+	visibility := set.String("visibility", "private", "GitHub visibility: private, public, or internal")
+	repo := set.String("repo", "", "GitHub repository owner/name (single plugin only)")
+	owner := set.String("owner", "", "GitHub owner (default: authenticated gh user)")
+	branch := set.String("branch", "main", "branch to push")
+	remote := set.String("remote", "", "git remote name (default: origin or dshpm)")
+	message := set.String("message", "", "commit message for pending changes")
+	tag := set.Bool("tag", false, "create and push a v<version> tag")
+	release := set.Bool("release", false, "create a GitHub release (implies --tag)")
+	dryRun := set.Bool("dry-run", false, "plan only")
+	force := set.Bool("force", false, "allow large files or remote replacement")
+	noBackup := set.Bool("no-backup", false, "skip the pre-publish backup")
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "visibility": true, "repo": true, "owner": true, "branch": true, "remote": true, "message": true})
+	if err != nil {
+		return 2
+	}
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	selected, err := selectLocalPlugins(instance.Profile.Plugins(), positionals, *allLocal)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	if *repo != "" && len(selected) > 1 {
+		fmt.Fprintln(stderr, "dshpm publish: --repo can only be used with one plugin")
+		return 2
+	}
+	if !*dryRun && !*noBackup {
+		_, dir, err := backup.Create(backup.CreateOptions{
+			Profile:     instance.Profile,
+			BackupDir:   instance.Config.BackupDir,
+			ToolVersion: version.Version,
+		})
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm: pre-publish backup failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Backup: %s\n", dir)
+	}
+	outcomes := make([]publishOutcome, 0, len(selected))
+	exit := 0
+	for _, plugin := range selected {
+		result, err := publish.Publish(context.Background(), publish.Options{
+			Dir:           plugin.LocalDir,
+			Repo:          *repo,
+			Owner:         *owner,
+			Visibility:    *visibility,
+			Branch:        *branch,
+			Remote:        *remote,
+			CommitMessage: *message,
+			Tag:           *tag || *release,
+			Release:       *release,
+			DryRun:        *dryRun,
+			Force:         *force,
+			Git:           instance.Config.Git,
+			GH:            instance.Config.GH,
+		})
+		if err != nil {
+			outcomes = append(outcomes, publishOutcome{Error: err.Error()})
+			fmt.Fprintf(stderr, "dshpm: publish %s: %v\n", plugin.Name, err)
+			exit = 1
+			continue
+		}
+		outcomes = append(outcomes, publishOutcome{Result: result})
+	}
+	if options.json {
+		writeJSON(stdout, outcomes)
+		return exit
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+	fmt.Fprintln(writer, "PLUGIN\tREPO\tVISIBILITY\tSTATUS\tURL")
+	for _, outcome := range outcomes {
+		if outcome.Result == nil {
+			continue
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", outcome.Result.Plugin, outcome.Result.Repo, outcome.Result.Visibility, outcome.Result.Status, outcome.Result.URL)
+	}
+	_ = writer.Flush()
+	if *dryRun {
+		fmt.Fprintln(stdout, "\nDry run: no files or repositories were changed.")
+	}
+	return exit
+}
+
+func selectLocalPlugins(plugins []model.Plugin, names []string, all bool) ([]model.Plugin, error) {
+	if all {
+		selected := make([]model.Plugin, 0)
+		for _, plugin := range plugins {
+			if plugin.Kind == model.SourceLocal {
+				selected = append(selected, plugin)
+			}
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("no local plugins found")
+		}
+		return selected, nil
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("choose local plugins by name or pass --all-local")
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[name] = true
+	}
+	selected := make([]model.Plugin, 0, len(names))
+	for _, plugin := range plugins {
+		if !wanted[plugin.Name] {
+			continue
+		}
+		if plugin.Kind != model.SourceLocal {
+			return nil, fmt.Errorf("plugin %s is %s, not a local plugin", plugin.Name, plugin.Kind)
+		}
+		selected = append(selected, plugin)
+		delete(wanted, plugin.Name)
+	}
+	if len(wanted) > 0 {
+		missing := make([]string, 0, len(wanted))
+		for name := range wanted {
+			missing = append(missing, name)
+		}
+		return nil, fmt.Errorf("unknown plugin(s): %s", strings.Join(missing, ", "))
+	}
+	return selected, nil
 }
