@@ -107,3 +107,107 @@ func run(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
 }
+
+func TestUpdateLocalConflictRestoresChanges(t *testing.T) {
+	home := t.TempDir()
+	upstream := filepath.Join(home, "upstream")
+	clone := filepath.Join(home, "external", "demo")
+	if err := os.MkdirAll(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, upstream, "init", "-b", "main")
+	run(t, upstream, "config", "user.email", "test@example.com")
+	run(t, upstream, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(upstream, "a.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, upstream, "add", ".")
+	run(t, upstream, "commit", "-m", "initial")
+	if err := os.MkdirAll(filepath.Dir(clone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, filepath.Dir(clone), "clone", upstream, clone)
+	run(t, clone, "config", "user.email", "test@example.com")
+	run(t, clone, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(clone, "a.txt"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upstream, "a.txt"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, upstream, "commit", "-am", "upstream change")
+	writeProfile(t, home, "web", `{"dependencies":{"demo":"link:`+clone+`"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, BackupDir: filepath.Join(home, "backups"), PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := instance.Update(context.Background(), UpdateOptions{Names: []string{"demo"}, NoBackup: true, NoBuild: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "conflict" {
+		t.Fatalf("results = %+v", results)
+	}
+	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "local\n" {
+		t.Fatalf("content = %q", content)
+	}
+}
+
+func TestUpdateLocalReappliesPatch(t *testing.T) {
+	home := t.TempDir()
+	upstream := filepath.Join(home, "upstream")
+	clone := filepath.Join(home, "external", "demo")
+	if err := os.MkdirAll(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, upstream, "init", "-b", "main")
+	run(t, upstream, "config", "user.email", "test@example.com")
+	run(t, upstream, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(upstream, "a.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, upstream, "add", ".")
+	run(t, upstream, "commit", "-m", "initial")
+	if err := os.MkdirAll(filepath.Dir(clone), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, filepath.Dir(clone), "clone", upstream, clone)
+	run(t, clone, "config", "user.email", "test@example.com")
+	run(t, clone, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(clone, "a.txt"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upstream, "b.txt"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, upstream, "add", ".")
+	run(t, upstream, "commit", "-m", "upstream change")
+	writeProfile(t, home, "web", `{"dependencies":{"demo":"link:`+clone+`"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, BackupDir: filepath.Join(home, "backups"), PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := instance.Update(context.Background(), UpdateOptions{Names: []string{"demo"}, NoBackup: true, NoBuild: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "updated" {
+		t.Fatalf("results = %+v", results)
+	}
+	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "local\n" {
+		t.Fatalf("content = %q", content)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+}

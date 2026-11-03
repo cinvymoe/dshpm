@@ -301,6 +301,11 @@ func (m *Manager) planLocal(plugin model.Plugin) (model.Plugin, UpdateResult, bo
 		result.Message = "local checkout is not a git repository"
 		return plugin, result, false, nil
 	}
+	if gitutil.Branch(plugin.LocalDir) == "HEAD" {
+		result.Status = "detached"
+		result.Message = "detached HEAD; check out a branch before updating"
+		return plugin, result, false, nil
+	}
 	if plugin.Dirty > 0 {
 		result.Message = fmt.Sprintf("%d local change(s) will be saved as a patch", plugin.Dirty)
 	}
@@ -391,6 +396,11 @@ func (m *Manager) applyLocal(ctx context.Context, plugin model.Plugin, options U
 		result.Status = "skipped"
 		return result
 	}
+	if gitutil.Branch(plugin.LocalDir) == "HEAD" {
+		result.Status = "detached"
+		result.Message = "detached HEAD; check out a branch before updating"
+		return result
+	}
 	oldHead, err := gitutil.Head(plugin.LocalDir)
 	if err != nil {
 		result.Status = "failed"
@@ -415,6 +425,17 @@ func (m *Manager) applyLocal(ctx context.Context, plugin model.Plugin, options U
 		result.Message = err.Error()
 		return result
 	}
+	ahead, _, err := gitutil.AheadBehind(plugin.LocalDir, targetCommit)
+	if err != nil {
+		result.Status = "failed"
+		result.Message = err.Error()
+		return result
+	}
+	if ahead > 0 {
+		result.Status = "local-commits"
+		result.Message = fmt.Sprintf("%d local commit(s) appeared after planning; not discarded automatically", ahead)
+		return result
+	}
 	result.To = target + "@" + gitutil.Shorten(targetCommit)
 	if _, err := gitutil.CreateBackupRef(plugin.LocalDir, time.Now().Format("20060102-150405")); err != nil {
 		result.Status = "failed"
@@ -434,8 +455,13 @@ func (m *Manager) applyLocal(ctx context.Context, plugin model.Plugin, options U
 	if len(patch) > 0 {
 		if err := gitutil.ApplyPatch(plugin.LocalDir, patch); err != nil {
 			conflicts := gitutil.ConflictFiles(plugin.LocalDir)
+			if restoreErr := restoreLocalChanges(plugin.LocalDir, oldHead, patch); restoreErr != nil {
+				result.Status = "conflict"
+				result.Message = "patch did not apply cleanly and local changes could not be restored: " + restoreErr.Error()
+				return result
+			}
 			result.Status = "conflict"
-			result.Message = "patch did not apply cleanly"
+			result.Message = "patch did not apply cleanly; local changes restored"
 			if len(conflicts) > 0 {
 				result.Message += ": " + strings.Join(conflicts, ", ")
 			}
@@ -444,12 +470,13 @@ func (m *Manager) applyLocal(ctx context.Context, plugin model.Plugin, options U
 	}
 	if !options.NoBuild {
 		if err := m.build(ctx, plugin.LocalDir, options.BuildTimeout); err != nil {
-			_ = gitutil.ResetHard(plugin.LocalDir, oldHead)
-			if len(patch) > 0 {
-				_ = gitutil.ApplyPatch(plugin.LocalDir, patch)
+			if restoreErr := restoreLocalChanges(plugin.LocalDir, oldHead, patch); restoreErr != nil {
+				result.Status = "build-failed"
+				result.Message = err.Error() + "; rollback failed: " + restoreErr.Error()
+				return result
 			}
 			result.Status = "build-failed"
-			result.Message = err.Error()
+			result.Message = err.Error() + "; local changes restored"
 			return result
 		}
 	}
@@ -458,6 +485,19 @@ func (m *Manager) applyLocal(ctx context.Context, plugin model.Plugin, options U
 	}
 	result.Status = "updated"
 	return result
+}
+
+func restoreLocalChanges(dir, head string, patch []byte) error {
+	if err := gitutil.ResetHard(dir, head); err != nil {
+		return err
+	}
+	if err := gitutil.CleanUntracked(dir); err != nil {
+		return err
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	return gitutil.ApplyPatch(dir, patch)
 }
 
 func (m *Manager) build(ctx context.Context, dir string, timeout time.Duration) error {
