@@ -1,0 +1,4 @@
+/dshpm
+/dist/
+*.test
+*.out
