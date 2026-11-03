@@ -831,6 +831,10 @@ func runPublish(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return 2
 	}
+	if *allLocal && len(positionals) > 0 {
+		fmt.Fprintln(stderr, "dshpm publish: --all-local cannot be combined with plugin names")
+		return 2
+	}
 	instance, err := newManager(options)
 	if err != nil {
 		fmt.Fprintf(stderr, "dshpm: %v\n", err)

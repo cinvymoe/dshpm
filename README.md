@@ -144,7 +144,7 @@ dshpm rollback <id> --apply --force
 
 ## 发布本地插件
 
-`publish` 只接受 `link:` / `file:` / `workspace:` 的本地插件。它会：
+`publish` 只接受 `link:` / `file:` / `workspace:` 的本地插件，并且要求已登录 `gh auth login`。它会：
 
 1. 在插件目录执行 `git init`（如果还不是 Git 仓库）；
 2. 缺少 `.gitignore` 时写入 `node_modules/`、`lib/`、`dist/` 等忽略规则；
