@@ -52,9 +52,11 @@ func TestRemoveInsertBlocks(t *testing.T) {
 		"- insert:",
 		"    - id: other",
 		"      name: other",
+		"- id: drop",
+		"  disabled: true",
 		"",
 	}, "\n")
-	updated, changed := removeInsertBlocks(content, map[string]struct{}{"drop": {}})
+	updated, changed := removePluginPatchBlocks(content, map[string]struct{}{"drop": {}})
 	if !changed {
 		t.Fatal("expected a change")
 	}
@@ -63,6 +65,9 @@ func TestRemoveInsertBlocks(t *testing.T) {
 	}
 	if !strings.Contains(updated, "id: keep") || !strings.Contains(updated, "id: other") || !strings.Contains(updated, "# keep this comment") {
 		t.Fatalf("unrelated content was lost:\n%s", updated)
+	}
+	if strings.Contains(updated, "disabled: true") {
+		t.Fatalf("id-only override remains:\n%s", updated)
 	}
 }
 
@@ -109,5 +114,55 @@ func TestUninstallDryRun(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Status != "planned" {
 		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestRemoveLocalSymlinks(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "external", "demo")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodeModules := filepath.Join(home, "profiles", "web", "node_modules")
+	if err := os.MkdirAll(filepath.Join(nodeModules, "@demo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(nodeModules, "@demo", "plugin")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(nodeModules, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLocalSymlinks(filepath.Join(home, "profiles", "web"), []string{"@demo/plugin", "real"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("link still exists: %v", err)
+	}
+	if _, err := os.Lstat(real); err != nil {
+		t.Fatalf("regular directory was removed: %v", err)
+	}
+}
+
+func TestRemovePluginPatchBlocksKeepsNestedNames(t *testing.T) {
+	content := strings.Join([]string{
+		"- id: keep",
+		"  config:",
+		"    name: drop",
+		"- id: drop",
+		"  disabled: true",
+		"",
+	}, "\n")
+	updated, changed := removePluginPatchBlocks(content, map[string]struct{}{"drop": {}})
+	if !changed {
+		t.Fatal("expected the id override to be removed")
+	}
+	if !strings.Contains(updated, "- id: keep") || !strings.Contains(updated, "name: drop") {
+		t.Fatalf("unrelated config was removed:\n%s", updated)
+	}
+	if strings.Contains(updated, "- id: drop") {
+		t.Fatalf("id override remains:\n%s", updated)
 	}
 }

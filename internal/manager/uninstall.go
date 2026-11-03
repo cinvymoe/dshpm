@@ -79,6 +79,9 @@ func (m *Manager) Uninstall(ctx context.Context, options UninstallOptions) ([]Un
 	if err := m.run(ctx, m.Profile.Dir, m.Config.PNPM, args...); err != nil {
 		return nil, fmt.Errorf("remove plugins: %w", err)
 	}
+	if err := removeLocalSymlinks(m.Profile.Dir, names); err != nil {
+		return nil, fmt.Errorf("remove local plugin links: %w (backup: %s)", err, backupPath)
+	}
 	if err := cleanProfileReferences(m.Profile.Dir, identifiers); err != nil {
 		return nil, fmt.Errorf("clean profile references: %w (backup: %s)", err, backupPath)
 	}
@@ -93,6 +96,28 @@ func (m *Manager) Uninstall(ctx context.Context, options UninstallOptions) ([]Un
 // used after restoring a historical backup.
 func (m *Manager) Install(ctx context.Context) error {
 	return m.run(ctx, m.Profile.Dir, m.Config.PNPM, "install", "--frozen-lockfile")
+}
+
+// removeLocalSymlinks removes leftover link: targets that pnpm can keep in
+// node_modules after their dependency declaration is removed.
+func removeLocalSymlinks(profileDir string, names []string) error {
+	for _, name := range names {
+		path := filepath.Join(profileDir, "node_modules", filepath.FromSlash(name))
+		info, err := os.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func localPackageName(dir string) string {
@@ -133,7 +158,7 @@ func cleanProfileReferences(profileDir string, identifiers map[string]struct{}) 
 		}
 		return fmt.Errorf("read cordis.patch.yml: %w", err)
 	}
-	cleaned, changed := removeInsertBlocks(string(patch), identifiers)
+	cleaned, changed := removePluginPatchBlocks(string(patch), identifiers)
 	if changed {
 		if err := writeFileAtomic(patchPath, []byte(cleaned), 0o644); err != nil {
 			return err
@@ -198,7 +223,9 @@ func bundleReference(entry any) string {
 
 var insertNamePattern = regexp.MustCompile(`(?m)(?:^|\s)(?:name|id)\s*:\s*["']?([^"'\s#\n]+)["']?`)
 
-func removeInsertBlocks(content string, identifiers map[string]struct{}) (string, bool) {
+// removePluginPatchBlocks drops top-level patch entries that name an
+// uninstalled plugin, including insert lists and id-targeted overrides.
+func removePluginPatchBlocks(content string, identifiers map[string]struct{}) (string, bool) {
 	blocks := splitPatchBlocks(content)
 	kept := make([]string, 0, len(blocks))
 	changed := false
@@ -237,10 +264,14 @@ func splitPatchBlocks(content string) []string {
 }
 
 func blockMatchesPlugin(block string, identifiers map[string]struct{}) bool {
-	if !strings.HasPrefix(block, "- ") || !strings.Contains(block, "insert:") {
+	if !strings.HasPrefix(block, "- ") {
 		return false
 	}
-	for _, match := range insertNamePattern.FindAllStringSubmatch(block, -1) {
+	subject := block
+	if !strings.Contains(block, "insert:") {
+		subject, _, _ = strings.Cut(block, "\n")
+	}
+	for _, match := range insertNamePattern.FindAllStringSubmatch(subject, -1) {
 		if _, ok := identifiers[match[1]]; ok {
 			return true
 		}

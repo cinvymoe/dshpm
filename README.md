@@ -119,7 +119,7 @@ dshpm uninstall dsh-context @indexyz/dsh-autocompact
 dshpm uninstall dsh-context --no-backup
 ```
 
-卸载会调用 `pnpm remove`，然后清理 profile 的 `package.json` 中 `dsh.profile.bundles` 条目，以及 `cordis.patch.yml` 中引用该插件的顶层 `- insert:` 块。**本地源码目录不会被删除**，之后可以重新安装或手动删除。卸载完成的插件需要重启 DSH 才会从运行时消失。
+卸载会调用 `pnpm remove`，清理 profile 的 `package.json` 中 `dsh.profile.bundles` 条目、`cordis.patch.yml` 中引用该插件的顶层条目（包括 `- insert:` 列表与 `- id: ...` 覆盖），并移除 `node_modules` 中残留的本地链接。**本地源码目录不会被删除**，之后可以重新安装或手动删除。卸载完成的插件需要重启 DSH 才会从运行时消失。
 
 ## 历史与回滚
 
