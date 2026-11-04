@@ -193,7 +193,7 @@ dshpm publish --all-local --visibility private
 
 ## 同步与升级
 
-`sync` 只处理 git 本地 checkout，不修改 npm/git 依赖：
+推荐顺序：先 `dshpm sync`，再 `dshpm upgrade`。`sync` 只处理 git 本地 checkout，不修改 npm/git 依赖：
 
 - 先 `git fetch --all --prune`，解析 upstream；
 - 本地没有提交时 fast-forward；
