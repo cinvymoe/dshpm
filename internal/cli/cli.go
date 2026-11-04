@@ -827,7 +827,7 @@ func runPublish(args []string, stdout, stderr io.Writer) int {
 	tag := set.Bool("tag", false, "create and push a v<version> tag")
 	release := set.Bool("release", false, "create a GitHub release (implies --tag)")
 	dryRun := set.Bool("dry-run", false, "plan only")
-	force := set.Bool("force", false, "allow large files or remote replacement")
+	force := set.Bool("force", false, "allow large files, remote replacement, or a bundle patch missing from files")
 	noBackup := set.Bool("no-backup", false, "skip the pre-publish backup")
 	noSwitch := set.Bool("no-switch", false, "keep the local link instead of switching to the published repository")
 	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "visibility": true, "repo": true, "owner": true, "branch": true, "remote": true, "message": true})

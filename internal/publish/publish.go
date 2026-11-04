@@ -47,8 +47,14 @@ type Result struct {
 }
 
 type packageJSON struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name    string   `json:"name"`
+	Version string   `json:"version"`
+	Files   []string `json:"files"`
+	DSH     struct {
+		Bundle struct {
+			Patch string `json:"patch"`
+		} `json:"bundle"`
+	} `json:"dsh"`
 }
 
 // Publish initializes a plugin repository when needed, commits pending files,
@@ -76,6 +82,9 @@ func Publish(ctx context.Context, options Options) (*Result, error) {
 	}
 	pkg, err := readPackage(options.Dir)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkBundlePatch(options.Dir, pkg, options.Force); err != nil {
 		return nil, err
 	}
 	repo, _, err := resolveRepo(ctx, &options, pkg)
@@ -178,6 +187,41 @@ func readPackage(dir string) (*packageJSON, error) {
 		return nil, fmt.Errorf("package.json has no name")
 	}
 	return &pkg, nil
+}
+
+// checkBundlePatch verifies the overlay referenced by dsh.bundle.patch
+// survives packing: pnpm and npm only ship entries covered by the files
+// array, and a missing overlay breaks dsh startup with ENOENT.
+func checkBundlePatch(dir string, pkg *packageJSON, force bool) error {
+	patch := strings.TrimSpace(pkg.DSH.Bundle.Patch)
+	if patch == "" {
+		return nil
+	}
+	clean := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(patch)), "./")
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return fmt.Errorf("dsh.bundle.patch %q escapes the package directory", patch)
+	}
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(clean))); err != nil {
+		return fmt.Errorf("dsh.bundle.patch target %s: %w", clean, err)
+	}
+	if len(pkg.Files) == 0 {
+		return nil
+	}
+	for _, entry := range pkg.Files {
+		entry = strings.TrimSuffix(strings.TrimPrefix(filepath.ToSlash(filepath.Clean(entry)), "./"), "/")
+		if entry == clean || strings.HasPrefix(clean, entry+"/") {
+			return nil
+		}
+		if strings.ContainsAny(entry, "*?[") {
+			if matched, _ := filepath.Match(entry, clean); matched {
+				return nil
+			}
+		}
+	}
+	if force {
+		return nil
+	}
+	return fmt.Errorf("dsh.bundle.patch points to %s, which the files array does not cover; add it to files or publish with --force", clean)
 }
 
 func normalizeVisibility(value string) (string, error) {

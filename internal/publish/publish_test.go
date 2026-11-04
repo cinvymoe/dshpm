@@ -2,12 +2,103 @@ package publish
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCheckBundlePatch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cordis.patch.yml"), []byte("- insert: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config", "cordis.patch.yml"), []byte("- insert: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parse := func(body string) *packageJSON {
+		t.Helper()
+		var pkg packageJSON
+		if err := json.Unmarshal([]byte(body), &pkg); err != nil {
+			t.Fatal(err)
+		}
+		return &pkg
+	}
+	tests := []struct {
+		name    string
+		body    string
+		force   bool
+		wantErr string
+	}{
+		{name: "no patch configured", body: `{"name":"a","files":["lib"]}`},
+		{name: "patch listed in files", body: `{"name":"a","files":["lib","cordis.patch.yml"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`},
+		{name: "patch missing from files", body: `{"name":"a","files":["lib"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`, wantErr: "files"},
+		{name: "force bypasses files check", body: `{"name":"a","files":["lib"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`, force: true},
+		{name: "no files array ships everything", body: `{"name":"a","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`},
+		{name: "glob entry covers patch", body: `{"name":"a","files":["lib","*.yml"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`},
+		{name: "directory entry covers patch", body: `{"name":"a","files":["config"],"dsh":{"bundle":{"patch":"config/cordis.patch.yml"}}}`},
+		{name: "patch target missing on disk", body: `{"name":"a","files":["lib","cordis.patch.yml"],"dsh":{"bundle":{"patch":"./missing.yml"}}}`, wantErr: "missing.yml"},
+		{name: "patch escapes package", body: `{"name":"a","dsh":{"bundle":{"patch":"../shared.yml"}}}`, wantErr: "escapes"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := checkBundlePatch(dir, parse(test.body), test.force)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("checkBundlePatch() = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("checkBundlePatch() = %v, want error containing %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestPublishRejectsUnlistedBundlePatch(t *testing.T) {
+	root := t.TempDir()
+	plugin := filepath.Join(root, "plugin")
+	if err := os.MkdirAll(plugin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"name":"demo","version":"0.1.0","files":["lib"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}`
+	if err := os.WriteFile(filepath.Join(plugin, "package.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plugin, "cordis.patch.yml"), []byte("- insert: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Publish(context.Background(), Options{
+		Dir:    plugin,
+		Owner:  "cinvymoe",
+		DryRun: true,
+		Git:    "git",
+		GH:     fakeGH(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "files") {
+		t.Fatalf("Publish() = %v, want files error", err)
+	}
+	result, err := Publish(context.Background(), Options{
+		Dir:    plugin,
+		Owner:  "cinvymoe",
+		DryRun: true,
+		Force:  true,
+		Git:    "git",
+		GH:     fakeGH(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "planned" {
+		t.Fatalf("result = %+v", result)
+	}
+}
 
 func runTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
