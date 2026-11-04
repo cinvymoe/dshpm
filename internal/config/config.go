@@ -15,6 +15,7 @@ type Config struct {
 	DSHHome        string `json:"dshHome,omitempty"`
 	DefaultProfile string `json:"defaultProfile,omitempty"`
 	BackupDir      string `json:"backupDir,omitempty"`
+	WorktreeRoot   string `json:"worktreeRoot,omitempty"`
 	NPMRegistry    string `json:"npmRegistry,omitempty"`
 	PNPMRegistry   string `json:"pnpmRegistry,omitempty"`
 	PNPM           string `json:"pnpm,omitempty"`
@@ -60,6 +61,9 @@ func LoadFile(configPath string) (Resolved, error) {
 	if cfg.BackupDir == "" {
 		cfg.BackupDir = filepath.Join(home, ".config", "dshpm", "backups")
 	}
+	if cfg.WorktreeRoot == "" {
+		cfg.WorktreeRoot = filepath.Join(home, ".config", "dshpm", "worktrees")
+	}
 	if cfg.NPMRegistry == "" {
 		cfg.NPMRegistry = "https://registry.npmjs.org"
 	}
@@ -74,6 +78,7 @@ func LoadFile(configPath string) (Resolved, error) {
 	}
 	cfg.DSHHome = expandPath(cfg.DSHHome, home)
 	cfg.BackupDir = expandPath(cfg.BackupDir, home)
+	cfg.WorktreeRoot = expandPath(cfg.WorktreeRoot, home)
 	return Resolved{Config: cfg, ConfigPath: configPath}, nil
 }
 

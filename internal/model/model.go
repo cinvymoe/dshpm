@@ -32,6 +32,9 @@ type Plugin struct {
 	Dirty            int        `json:"dirty"`
 	Ahead            int        `json:"ahead"`
 	Behind           int        `json:"behind"`
+	WorktreeDir      string     `json:"worktreeDir,omitempty"`
+	WorktreeRef      string     `json:"worktreeRef,omitempty"`
+	WorktreeUsed     bool       `json:"worktreeUsed,omitempty"`
 	Status           string     `json:"status"`
 	Error            string     `json:"error,omitempty"`
 	Bundled          bool       `json:"bundled"`

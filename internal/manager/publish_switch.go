@@ -18,6 +18,20 @@ func (m *Manager) SwitchToGit(ctx context.Context, name, repo string) error {
 	if repo == "" {
 		return fmt.Errorf("published repository is empty")
 	}
+	return m.switchDependency(ctx, name, "github:"+repo)
+}
+
+// SwitchToWorktree points a local dependency at a remote worktree checkout.
+// The worktree is built in place; the original local checkout is untouched.
+func (m *Manager) SwitchToWorktree(ctx context.Context, name, worktree string) error {
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		return fmt.Errorf("worktree path is empty")
+	}
+	return m.switchDependency(ctx, name, "link:"+worktree)
+}
+
+func (m *Manager) switchDependency(ctx context.Context, name, spec string) error {
 	var selected *model.Plugin
 	for _, plugin := range m.Profile.Plugins() {
 		if plugin.Name == name {
@@ -33,9 +47,11 @@ func (m *Manager) SwitchToGit(ctx context.Context, name, repo string) error {
 		return fmt.Errorf("%s is %s, not a local plugin", name, selected.Kind)
 	}
 	oldSpec := selected.Spec
+	if oldSpec == spec {
+		return nil
+	}
 	lockPath := filepath.Join(m.Profile.Dir, "pnpm-lock.yaml")
 	oldLock, lockErr := os.ReadFile(lockPath)
-	spec := "github:" + repo
 	if err := m.Profile.SetDependency(name, spec); err != nil {
 		return err
 	}

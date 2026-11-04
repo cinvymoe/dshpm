@@ -262,3 +262,109 @@ func ConflictFiles(dir string) []string {
 	}
 	return strings.Split(value, "\n")
 }
+
+// RepoState reports an unfinished git operation that makes automatic sync
+// unsafe, such as "rebase", "merge", "cherry-pick", or "bisect".
+func RepoState(dir string) string {
+	gitDir, err := Output(dir, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return ""
+	}
+	for _, state := range []struct {
+		path string
+		name string
+	}{
+		{"rebase-merge", "rebase"},
+		{"rebase-apply", "rebase"},
+		{"MERGE_HEAD", "merge"},
+		{"CHERRY_PICK_HEAD", "cherry-pick"},
+		{"REVERT_HEAD", "revert"},
+		{"BISECT_LOG", "bisect"},
+	} {
+		if _, err := os.Stat(filepath.Join(gitDir, state.path)); err == nil {
+			return state.name
+		}
+	}
+	return ""
+}
+
+// Rebase replays the current branch on top of ref.
+func Rebase(dir, ref string) error {
+	var stdout, stderr bytes.Buffer
+	if err := Run(dir, &stdout, &stderr, "rebase", ref); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = strings.TrimSpace(stdout.String())
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("git rebase %s: %s", ref, message)
+	}
+	return nil
+}
+
+// RebaseAbort aborts an in-progress rebase.
+func RebaseAbort(dir string) {
+	_, _ = Output(dir, "rebase", "--abort")
+}
+
+// MergeFFOnly fast-forwards the current branch to ref without creating a
+// merge commit.
+func MergeFFOnly(dir, ref string) error {
+	_, err := Output(dir, "merge", "--ff-only", ref)
+	return err
+}
+
+// WorktreeRegistered reports whether path is a registered worktree of dir.
+func WorktreeRegistered(dir, path string) bool {
+	value, err := Output(dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(value, "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		candidate, err := filepath.Abs(strings.TrimSpace(strings.TrimPrefix(line, "worktree ")))
+		if err == nil && filepath.Clean(candidate) == filepath.Clean(absolute) {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureWorktree checks out ref in a detached worktree at path. An existing
+// worktree of the same repository is refreshed; an unrelated directory is
+// never deleted or reused.
+func EnsureWorktree(dir, path, ref string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("worktree path is empty")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(absolute); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("worktree path is not a directory: %s", absolute)
+		}
+		if !WorktreeRegistered(dir, absolute) {
+			return fmt.Errorf("worktree path exists but is not registered to %s: %s", dir, absolute)
+		}
+		_, err := Output(absolute, "checkout", "--force", "--detach", ref)
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(absolute), 0o755); err != nil {
+		return err
+	}
+	_, _ = Output(dir, "worktree", "prune")
+	if _, err := Output(dir, "worktree", "add", "--force", "--detach", absolute, ref); err != nil {
+		return err
+	}
+	return nil
+}

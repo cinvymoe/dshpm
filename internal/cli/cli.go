@@ -36,8 +36,9 @@ Commands:
   history              List backups for the selected profile
   rollback [id|path]   Restore a historical backup (plan unless --apply)
   publish [names...]   Publish local plugins to GitHub through gh
-  update [names...]    Update plugins from their remote source
-  sync                 Alias for update
+  sync [names...]      Sync local git checkouts with remote (rebase/worktree)
+  upgrade [names...]   Upgrade plugins; local checkouts build from local or worktree
+  update [names...]    Update plugins with the legacy patch-based flow
   profiles             List DSH profiles and dependency counts
   doctor               Check the runtime environment
   init                 Write a default config file
@@ -81,7 +82,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runRollback(rest, stdout, stderr)
 	case "publish":
 		return runPublish(rest, stdout, stderr)
-	case "update", "sync":
+	case "sync":
+		return runSync(rest, stdout, stderr)
+	case "upgrade":
+		return runUpgrade(rest, stdout, stderr)
+	case "update":
 		return runUpdate(rest, stdout, stderr)
 	case "profiles":
 		return runProfiles(rest, stdout, stderr)
@@ -217,6 +222,13 @@ func shortCommit(commit string) string {
 
 func changes(plugin model.Plugin) string {
 	parts := []string{}
+	if plugin.WorktreeUsed {
+		ref := plugin.WorktreeRef
+		if ref == "" {
+			ref = "remote"
+		}
+		parts = append(parts, "worktree:"+ref)
+	}
 	if plugin.Dirty > 0 {
 		parts = append(parts, fmt.Sprintf("dirty:%d", plugin.Dirty))
 	}
@@ -342,6 +354,146 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	if *apply {
 		fmt.Fprintln(stdout, "Restart DSH to apply the restored state.")
+	}
+	return 0
+}
+
+func runSync(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("sync", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	all := set.Bool("all", false, "sync all local checkouts")
+	dryRun := set.Bool("dry-run", false, "plan only")
+	noBackup := set.Bool("no-backup", false, "skip the pre-sync backup")
+	worktreeRoot := set.String("worktree-root", "", "worktree root directory")
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "worktree-root": true})
+	if err != nil {
+		return 2
+	}
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	results, err := instance.Sync(context.Background(), manager.SyncOptions{
+		All:          *all,
+		Names:        positionals,
+		DryRun:       *dryRun,
+		NoBackup:     *noBackup,
+		BackupDir:    instance.Config.BackupDir,
+		WorktreeRoot: *worktreeRoot,
+		Out:          stdout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	if options.json {
+		writeJSON(stdout, results)
+		return 0
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+	fmt.Fprintln(writer, "PLUGIN\tKIND\tFROM\tTO\tACTION\tRESULT\tWORKTREE")
+	failures := 0
+	for _, result := range results {
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			result.Name, result.Kind, result.From, result.To, result.Action,
+			syncResultLabel(result), result.WorktreeDir)
+		if result.Status == "failed" || result.Status == "error" || result.Status == "blocked" {
+			failures++
+		}
+	}
+	_ = writer.Flush()
+	for _, result := range results {
+		if result.BackupPath != "" {
+			fmt.Fprintf(stdout, "\nBackup: %s\n", result.BackupPath)
+			break
+		}
+	}
+	if *dryRun {
+		fmt.Fprintln(stdout, "\nDry run: no files were changed.")
+	} else {
+		fmt.Fprintln(stdout, "\nSync complete. Restart DSH if plugin sources changed.")
+	}
+	if failures > 0 {
+		return 1
+	}
+	return 0
+}
+
+func syncResultLabel(result manager.SyncResult) string {
+	if result.Message == "" {
+		return result.Status
+	}
+	message := strings.ReplaceAll(result.Message, "\n", " ")
+	if len(message) > 140 {
+		message = message[:137] + "..."
+	}
+	return result.Status + " (" + message + ")"
+}
+
+func runUpgrade(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	all := set.Bool("all", false, "upgrade all plugins")
+	dryRun := set.Bool("dry-run", false, "plan only")
+	noBackup := set.Bool("no-backup", false, "skip the pre-upgrade backup")
+	noBuild := set.Bool("no-build", false, "skip building local checkouts")
+	worktreeRoot := set.String("worktree-root", "", "worktree root directory")
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "worktree-root": true})
+	if err != nil {
+		return 2
+	}
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	results, err := instance.Upgrade(context.Background(), manager.UpgradeOptions{
+		All:          *all,
+		Names:        positionals,
+		DryRun:       *dryRun,
+		NoBackup:     *noBackup,
+		NoBuild:      *noBuild,
+		BackupDir:    instance.Config.BackupDir,
+		WorktreeRoot: *worktreeRoot,
+		Out:          stdout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	if options.json {
+		writeJSON(stdout, results)
+		return 0
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+	fmt.Fprintln(writer, "PLUGIN\tKIND\tFROM\tTO\tRESULT\tWORKTREE")
+	failures := 0
+	for _, result := range results {
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			result.Name, result.Kind, result.From, result.To, resultLabel(result), result.WorktreeDir)
+		if result.Status == "failed" || result.Status == "error" || result.Status == "build-failed" {
+			failures++
+		}
+	}
+	_ = writer.Flush()
+	for _, result := range results {
+		if result.BackupPath != "" {
+			fmt.Fprintf(stdout, "\nBackup: %s\n", result.BackupPath)
+			break
+		}
+	}
+	if *dryRun {
+		fmt.Fprintln(stdout, "\nDry run: no files were changed.")
+	} else {
+		fmt.Fprintln(stdout, "\nRestart DSH to load upgraded plugins.")
+	}
+	if failures > 0 {
+		return 1
 	}
 	return 0
 }
@@ -557,6 +709,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		DSHHome:        filepath.Join(home, ".dsh"),
 		DefaultProfile: "web",
 		BackupDir:      filepath.Join(home, ".config", "dshpm", "backups"),
+		WorktreeRoot:   filepath.Join(home, ".config", "dshpm", "worktrees"),
 		NPMRegistry:    "https://registry.npmjs.org",
 		PNPM:           "pnpm",
 		Git:            "git",

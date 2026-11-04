@@ -4,7 +4,7 @@
 
 - **区分本地版本和远程版本**：同时显示本地已安装版本 / 本地 checkout 的 commit，以及 npm registry 或 git 上游的最新版本。
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
-- **同步更新**：npm 插件通过 pnpm 升级；git 依赖重新解析上游；本地 checkout 在保留未提交改动的前提下快进到上游。
+- **同步与升级**：`sync` 对 git 本地 checkout 做 fetch + fast-forward/rebase；有未提交改动或 rebase 冲突时，把远程版本检出到独立 worktree，不碰本地修改。`upgrade` 对 npm/git 依赖走 pnpm；本地 checkout 有 worktree 时构建 worktree 并把 profile 切到该 worktree，没有 worktree 时构建本地 checkout。`update` 保留旧的 patch 流程。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
 - **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release；发布成功后默认把 profile 依赖切到 `github:OWNER/REPO` 远程管理。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
@@ -18,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.4.0" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.0" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -42,7 +42,14 @@ dshpm update dsh-context --dry-run
 # 更新指定的 npm / git 插件
 dshpm update dsh-context @indexyz/dsh-autocompact
 
-# 更新所有有更新的插件（会先自动备份）
+# 同步本地 git 插件；冲突时自动创建远程 worktree
+dshpm sync --all --dry-run
+dshpm sync --all
+
+# 升级插件；本地插件在 worktree 存在时构建并切到 worktree
+dshpm upgrade --all
+
+# 旧版 patch 流程仍保留
 dshpm update --all
 
 # 卸载插件：移除 profile 依赖、bundle 与 cordis.patch 引用，保留本地源码
@@ -71,7 +78,7 @@ dshpm doctor
 | 本地目录 (`link:` / `file:`) | 本地 checkout 的 `package.json` 版本 + `git HEAD` | 本地 checkout `origin` 的 `HEAD` |
 | tarball (`.tgz`) | 已安装版本 | `-`（没有可查询的更新源） |
 
-`CHANGES` 列显示本地 checkout 的未提交文件数、ahead/behind 提交数。`STATUS` 列会给出 `up-to-date`、`update`、`local-only`、`dirty`、`ahead`、`diverged`、`pinned` 等状态。
+`CHANGES` 列显示本地 checkout 的未提交文件数、ahead/behind 提交数；使用远程 worktree 时显示 `worktree:<ref>`。`STATUS` 列会给出 `up-to-date`、`update`、`local-only`、`dirty`、`ahead`、`diverged`、`worktree`、`pinned` 等状态。
 
 ## 备份格式
 
@@ -184,6 +191,32 @@ dshpm publish --all-local --visibility private
 
 发布成功后默认切换为远程管理：profile 依赖会变成 `github:OWNER/REPO`，并执行一次 `pnpm install` 让本地 `node_modules` 改为远程 checkout。如果你还要继续本地开发，使用 `--no-switch`；`--dry-run` 只展示计划，不会改写依赖。
 
+## 同步与升级
+
+`sync` 只处理 git 本地 checkout，不修改 npm/git 依赖：
+
+- 先 `git fetch --all --prune`，解析 upstream；
+- 本地没有提交时 fast-forward；
+- 本地提交与远程分叉时执行 `git rebase <upstream>`；
+- 工作区有未提交改动或 rebase 冲突时，**不改本地 checkout**，而是把远程版本检出到独立 worktree：默认 `~/.config/dshpm/worktrees/<profile>/<plugin>`；
+- `dshpm list` 会将该插件标记为 `worktree`，`CHANGES` 显示 `worktree:<ref>`。
+
+`upgrade` 复用 `update` 的 npm/git 升级路径；本地 checkout 有 worktree 时在 worktree 构建，并在成功后把 profile 依赖切到 `link:<worktree>` 后执行 `pnpm install`；没有 worktree 时构建本地 checkout。`--no-build` 只更新依赖，不运行构建（存在 worktree 时也不会切换 profile）。
+
+```sh
+# 先看同步计划
+dshpm sync --all --dry-run
+
+# 同步全部本地 git 插件；冲突时生成 worktree
+dshpm sync --all
+
+# 升级全部插件；若 sync 已生成 worktree，会构建并切换过去
+dshpm upgrade --all
+
+# 只升级指定插件，跳过构建
+dshpm upgrade dsh-context @dsh-external/dsh-recent-chats --no-build
+```
+
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
@@ -207,6 +240,7 @@ dshpm publish --all-local --visibility private
   "dshHome": "~/.dsh",
   "defaultProfile": "web",
   "backupDir": "~/.config/dshpm/backups",
+  "worktreeRoot": "~/.config/dshpm/worktrees",
   "npmRegistry": "https://registry.npmjs.org",
   "pnpmRegistry": "https://registry.npmjs.org",
   "pnpm": "pnpm",
@@ -215,7 +249,7 @@ dshpm publish --all-local --visibility private
 }
 ```
 
-`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
+`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`worktreeRoot` 是 `sync` 冲突时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
 
 ## 命令一览
 
@@ -228,7 +262,9 @@ dshpm publish --all-local --visibility private
 | `dshpm history` | 列出历史备份 |
 | `dshpm rollback [id]` | 还原历史备份（默认只做计划） |
 | `dshpm publish <name...>` / `--all-local` | 通过 gh 发布本地插件；`--dry-run` 只做计划 |
-| `dshpm update <name...>` / `--all` | 更新插件；`--dry-run` 只做计划 |
+| `dshpm sync <name...>` / `--all` | 同步本地 git checkout；冲突时生成远程 worktree |
+| `dshpm upgrade <name...>` / `--all` | 升级插件并构建本地/worktree；`--dry-run` 只做计划 |
+| `dshpm update <name...>` / `--all` | 旧的 patch 式更新；`--dry-run` 只做计划 |
 | `dshpm profiles` | 列出 profile 与依赖数量 |
 | `dshpm doctor` | 检查 DSH 目录、git、pnpm |
 | `dshpm init` | 写默认配置文件 |

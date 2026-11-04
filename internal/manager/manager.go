@@ -99,6 +99,14 @@ func (m *Manager) Enrich(plugin *model.Plugin) {
 			plugin.Status = "missing"
 			return
 		}
+		worktree := m.worktreeDirFor(plugin.Name, "")
+		if gitutil.WorktreeRegistered(plugin.LocalDir, worktree) {
+			if info, err := os.Stat(worktree); err == nil && info.IsDir() {
+				plugin.WorktreeDir = worktree
+				plugin.WorktreeRef = gitutil.ShortHead(worktree)
+				plugin.WorktreeUsed = true
+			}
+		}
 		gitURL := plugin.GitURL
 		if gitURL == "" {
 			gitURL = gitutil.RemoteURL(plugin.LocalDir, "origin")
@@ -130,6 +138,9 @@ func (m *Manager) Enrich(plugin *model.Plugin) {
 			plugin.Status = "up-to-date"
 		default:
 			plugin.Status = "remote-diff"
+		}
+		if plugin.WorktreeUsed {
+			plugin.Status = "worktree"
 		}
 	case model.SourceTarball:
 		plugin.Status = "pinned"
@@ -176,13 +187,15 @@ type UpdateOptions struct {
 
 // UpdateResult is the outcome for one plugin.
 type UpdateResult struct {
-	Name       string           `json:"name"`
-	Kind       model.SourceKind `json:"kind"`
-	From       string           `json:"from,omitempty"`
-	To         string           `json:"to,omitempty"`
-	Status     string           `json:"status"`
-	Message    string           `json:"message,omitempty"`
-	BackupPath string           `json:"backupPath,omitempty"`
+	Name        string           `json:"name"`
+	Kind        model.SourceKind `json:"kind"`
+	From        string           `json:"from,omitempty"`
+	To          string           `json:"to,omitempty"`
+	Status      string           `json:"status"`
+	Message     string           `json:"message,omitempty"`
+	BackupPath  string           `json:"backupPath,omitempty"`
+	WorktreeDir string           `json:"worktreeDir,omitempty"`
+	WorktreeRef string           `json:"worktreeRef,omitempty"`
 }
 
 // Update updates selected plugins. Registry and git dependencies are updated
