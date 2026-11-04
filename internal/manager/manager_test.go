@@ -2,15 +2,18 @@ package manager
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cinvymoe/dshpm/internal/config"
 	"github.com/cinvymoe/dshpm/internal/model"
+	"github.com/cinvymoe/dshpm/internal/profile"
 	"github.com/cinvymoe/dshpm/internal/remote"
 )
 
@@ -96,6 +99,111 @@ func TestUpdateDryRunLocal(t *testing.T) {
 	}
 	if results[0].Kind != model.SourceLocal {
 		t.Fatalf("kind = %q", results[0].Kind)
+	}
+}
+
+// fakePNPM returns a pnpm stand-in. In "ok" mode it moves pnpm-lock.yaml to
+// $FAKE_HEAD on `pnpm update demo`; in "stale" mode it exits 0 without
+// touching the lockfile, reproducing the no-op that made updates lie.
+func fakePNPM(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pnpm")
+	script := `#!/bin/sh
+if [ "$1" = "update" ] && [ "$FAKE_PNPM_MODE" = "ok" ]; then
+  cat > pnpm-lock.yaml <<EOF
+importers:
+  .:
+    dependencies:
+      demo:
+        specifier: git+https://example.com/demo.git
+        version: git+https://example.com/demo.git#$FAKE_HEAD
+EOF
+fi
+exit 0
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func gitHead(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v\n%s", err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func setupGitUpstream(t *testing.T, home string) (string, string) {
+	t.Helper()
+	seed := filepath.Join(home, "seed")
+	if err := os.MkdirAll(seed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, seed, "init", "-b", "main")
+	run(t, seed, "config", "user.email", "test@example.com")
+	run(t, seed, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, seed, "add", ".")
+	run(t, seed, "commit", "-m", "initial")
+	head := gitHead(t, seed)
+	bare := filepath.Join(home, "upstream.git")
+	run(t, home, "clone", "--bare", seed, bare)
+	return bare, head
+}
+
+func TestApplyGitUpdateVerifiesLockfile(t *testing.T) {
+	home := t.TempDir()
+	bare, head := setupGitUpstream(t, home)
+	t.Setenv("FAKE_PNPM_MODE", "ok")
+	t.Setenv("FAKE_HEAD", head)
+	profileDir := filepath.Join(home, "profiles", "web")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		Config:  config.Resolved{Config: config.Config{DSHHome: home, PNPM: fakePNPM(t), Git: "git"}},
+		Profile: &profile.Profile{Name: "web", Dir: profileDir},
+		Out:     io.Discard,
+	}
+	plugin := model.Plugin{Name: "demo", Kind: model.SourceGit, GitURL: bare, Spec: "git+https://example.com/demo.git"}
+	result := m.applyOne(context.Background(), plugin, UpdateOptions{}, "")
+	if result.Status != "updated" {
+		t.Fatalf("result = %+v", result)
+	}
+	if !strings.HasSuffix(result.To, "@"+head[:7]) {
+		t.Fatalf("to = %q, want commit %s", result.To, head[:7])
+	}
+}
+
+func TestApplyGitUpdateRejectsStaleLockfile(t *testing.T) {
+	home := t.TempDir()
+	bare, _ := setupGitUpstream(t, home)
+	t.Setenv("FAKE_PNPM_MODE", "stale")
+	profileDir := filepath.Join(home, "profiles", "web")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := strings.Repeat("a", 40)
+	lockfile := "importers:\n  .:\n    dependencies:\n      demo:\n        specifier: git+https://example.com/demo.git\n        version: git+https://example.com/demo.git#" + stale + "\n"
+	if err := os.WriteFile(filepath.Join(profileDir, "pnpm-lock.yaml"), []byte(lockfile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		Config:  config.Resolved{Config: config.Config{DSHHome: home, PNPM: fakePNPM(t), Git: "git"}},
+		Profile: &profile.Profile{Name: "web", Dir: profileDir},
+		Out:     io.Discard,
+	}
+	plugin := model.Plugin{Name: "demo", Kind: model.SourceGit, GitURL: bare, Spec: "git+https://example.com/demo.git"}
+	result := m.applyOne(context.Background(), plugin, UpdateOptions{}, "")
+	if result.Status != "failed" || !strings.Contains(result.Message, "lockfile") {
+		t.Fatalf("result = %+v", result)
 	}
 }
 

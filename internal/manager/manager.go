@@ -355,6 +355,7 @@ func (m *Manager) applyOne(ctx context.Context, plugin model.Plugin, options Upd
 	case model.SourceRegistry, model.SourceGit:
 		result.To = ""
 		args := []string{"add", plugin.Name + "@" + plugin.Spec}
+		expectedCommit := ""
 		if plugin.Kind == model.SourceRegistry {
 			latest, err := m.Registry.Latest(context.Background(), remote.PackageNameFromSpec(plugin.Name, plugin.Spec))
 			if err != nil {
@@ -372,6 +373,11 @@ func (m *Manager) applyOne(ctx context.Context, plugin model.Plugin, options Upd
 				return result
 			}
 			result.To = head.Ref + "@" + gitutil.Shorten(head.Commit)
+			expectedCommit = head.Commit
+			// pnpm add with the unchanged spec is a no-op for git deps: the
+			// lockfile keeps the old commit. pnpm update re-resolves the branch
+			// head without rewriting the manifest spec.
+			args = []string{"update", plugin.Name}
 		}
 		if m.Config.PNPMRegistry != "" {
 			args = append(args, "--registry", m.Config.PNPMRegistry)
@@ -380,6 +386,14 @@ func (m *Manager) applyOne(ctx context.Context, plugin model.Plugin, options Upd
 			result.Status = "failed"
 			result.Message = err.Error()
 			return result
+		}
+		if plugin.Kind == model.SourceGit {
+			locked := profile.LockGitCommits(m.Profile.Dir)[plugin.Name]
+			if locked == "" || (!strings.HasPrefix(expectedCommit, locked) && !strings.HasPrefix(locked, expectedCommit)) {
+				result.Status = "failed"
+				result.Message = fmt.Sprintf("pnpm update did not move the lockfile to %s (locked at %q)", gitutil.Shorten(expectedCommit), locked)
+				return result
+			}
 		}
 		result.Status = "updated"
 		return result
