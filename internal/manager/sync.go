@@ -290,7 +290,7 @@ func (m *Manager) worktreeDirFor(name, root string) string {
 		root = m.Config.WorktreeRoot
 	}
 	if root == "" {
-		root = filepath.Join(m.Config.DSHHome, "..", ".config", "dshpm", "worktrees")
+		root = filepath.Join("/data", "project", "dshpm-worktrees")
 	}
 	return filepath.Join(root, m.Profile.Name, safePathName(name))
 }

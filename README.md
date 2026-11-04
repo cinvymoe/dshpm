@@ -18,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.0" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.1" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -198,7 +198,7 @@ dshpm publish --all-local --visibility private
 - 先 `git fetch --all --prune`，解析 upstream；
 - 本地没有提交时 fast-forward；
 - 本地提交与远程分叉时执行 `git rebase <upstream>`；
-- 工作区有未提交改动或 rebase 冲突时，**不改本地 checkout**，而是把远程版本检出到独立 worktree：默认 `~/.config/dshpm/worktrees/<profile>/<plugin>`；
+- 工作区有未提交改动或 rebase 冲突时，**不改本地 checkout**，而是把远程版本检出到独立 worktree：默认 `/data/project/dshpm-worktrees/<profile>/<plugin>`；
 - `dshpm list` 会将该插件标记为 `worktree`，`CHANGES` 显示 `worktree:<ref>`。
 
 `upgrade` 复用 `update` 的 npm/git 升级路径；本地 checkout 有 worktree 时在 worktree 构建，并在成功后把 profile 依赖切到 `link:<worktree>` 后执行 `pnpm install`；没有 worktree 时构建本地 checkout。`--no-build` 只更新依赖，不运行构建（存在 worktree 时也不会切换 profile）。
@@ -240,7 +240,7 @@ dshpm upgrade dsh-context @dsh-external/dsh-recent-chats --no-build
   "dshHome": "~/.dsh",
   "defaultProfile": "web",
   "backupDir": "~/.config/dshpm/backups",
-  "worktreeRoot": "~/.config/dshpm/worktrees",
+  "worktreeRoot": "/data/project/dshpm-worktrees",
   "npmRegistry": "https://registry.npmjs.org",
   "pnpmRegistry": "https://registry.npmjs.org",
   "pnpm": "pnpm",

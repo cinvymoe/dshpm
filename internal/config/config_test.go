@@ -38,3 +38,15 @@ func TestResolveProfileNameExplicitWins(t *testing.T) {
 		t.Fatalf("profile = %q, want custom", got)
 	}
 }
+
+func TestLoadDefaultsWorktreeRootToDataProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg, err := LoadFile(filepath.Join(home, "missing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorktreeRoot != "/data/project/dshpm-worktrees" {
+		t.Fatalf("worktree root = %q, want /data/project/dshpm-worktrees", cfg.WorktreeRoot)
+	}
+}

@@ -62,7 +62,7 @@ func LoadFile(configPath string) (Resolved, error) {
 		cfg.BackupDir = filepath.Join(home, ".config", "dshpm", "backups")
 	}
 	if cfg.WorktreeRoot == "" {
-		cfg.WorktreeRoot = filepath.Join(home, ".config", "dshpm", "worktrees")
+		cfg.WorktreeRoot = filepath.Join("/data", "project", "dshpm-worktrees")
 	}
 	if cfg.NPMRegistry == "" {
 		cfg.NPMRegistry = "https://registry.npmjs.org"

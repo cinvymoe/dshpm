@@ -709,7 +709,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		DSHHome:        filepath.Join(home, ".dsh"),
 		DefaultProfile: "web",
 		BackupDir:      filepath.Join(home, ".config", "dshpm", "backups"),
-		WorktreeRoot:   filepath.Join(home, ".config", "dshpm", "worktrees"),
+		WorktreeRoot:   filepath.Join("/data", "project", "dshpm-worktrees"),
 		NPMRegistry:    "https://registry.npmjs.org",
 		PNPM:           "pnpm",
 		Git:            "git",
