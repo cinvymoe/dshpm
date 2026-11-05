@@ -246,3 +246,19 @@ func TestUpgradeSwitchesProfileToWorktree(t *testing.T) {
 		t.Fatalf("profile was not switched to worktree: %s", data)
 	}
 }
+
+func TestSyncSkipsUnmanagedPlugin(t *testing.T) {
+	home, _, clone := syncFixture(t)
+	instance := newTestManager(t, home, clone)
+	instance.Config.Unmanaged = []string{"demo"}
+	results, err := instance.Sync(context.Background(), SyncOptions{Names: []string{"demo"}, NoBackup: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("results = %+v", results)
+	}
+	if !strings.Contains(results[0].Message, "unmanaged") {
+		t.Fatalf("message = %q", results[0].Message)
+	}
+}

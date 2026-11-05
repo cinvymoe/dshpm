@@ -319,3 +319,55 @@ func TestUpdateLocalReappliesPatch(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestListMarksUnmanagedPlugin(t *testing.T) {
+	home := t.TempDir()
+	writeProfile(t, home, "web", `{"dependencies":{"demo":"1.0.0"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, Unmanaged: []string{"demo"}, PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Offline = true
+	plugins, err := instance.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 1 || plugins[0].Managed {
+		t.Fatalf("plugins = %+v", plugins)
+	}
+}
+
+func TestUpdateSkipsUnmanagedPlugin(t *testing.T) {
+	home := t.TempDir()
+	writeProfile(t, home, "web", `{"dependencies":{"demo":"1.0.0"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, Unmanaged: []string{"demo"}, PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := instance.Update(context.Background(), UpdateOptions{Names: []string{"demo"}, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("results = %+v", results)
+	}
+}
+
+func TestUpgradeSkipsUnmanagedPlugin(t *testing.T) {
+	home := t.TempDir()
+	writeProfile(t, home, "web", `{"dependencies":{"demo":"1.0.0"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, Unmanaged: []string{"demo"}, PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{Names: []string{"demo"}, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "skipped" {
+		t.Fatalf("results = %+v", results)
+	}
+}

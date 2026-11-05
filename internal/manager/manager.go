@@ -163,6 +163,7 @@ func (m *Manager) List(ctx context.Context) ([]model.Plugin, error) {
 				return
 			}
 			defer func() { <-semaphore }()
+			plugin.Managed = m.Config.IsManaged(plugin.Name)
 			m.Enrich(plugin)
 		}(&plugins[index])
 	}
@@ -212,7 +213,8 @@ func (m *Manager) Update(ctx context.Context, options UpdateOptions) ([]UpdateRe
 	if err != nil {
 		return nil, err
 	}
-	results := make([]UpdateResult, 0, len(selected))
+	selected, unmanaged := m.partitionManaged(selected)
+	results := make([]UpdateResult, 0, len(selected)+len(unmanaged))
 	needsBackup := false
 	for _, plugin := range selected {
 		result, candidate, err := m.planOne(plugin, options)
@@ -227,7 +229,7 @@ func (m *Manager) Update(ctx context.Context, options UpdateOptions) ([]UpdateRe
 		}
 	}
 	if !needsBackup {
-		return results, nil
+		return append(results, unmanagedUpdateResults(unmanaged, "updated")...), nil
 	}
 	if options.DryRun {
 		for index := range results {
@@ -235,7 +237,7 @@ func (m *Manager) Update(ctx context.Context, options UpdateOptions) ([]UpdateRe
 				results[index].Status = "would-update"
 			}
 		}
-		return results, nil
+		return append(results, unmanagedUpdateResults(unmanaged, "updated")...), nil
 	}
 	backupPath := ""
 	if !options.NoBackup {
@@ -258,7 +260,7 @@ func (m *Manager) Update(ctx context.Context, options UpdateOptions) ([]UpdateRe
 		result := m.applyOne(ctx, selected[index], options, backupPath)
 		results[index] = result
 	}
-	return results, nil
+	return append(results, unmanagedUpdateResults(unmanaged, "updated")...), nil
 }
 
 func (m *Manager) planOne(plugin model.Plugin, options UpdateOptions) (UpdateResult, bool, error) {
@@ -596,6 +598,34 @@ func selectPlugins(plugins []model.Plugin, options UpdateOptions) ([]model.Plugi
 		return nil, fmt.Errorf("unknown plugin(s): %s", strings.Join(missing, ", "))
 	}
 	return selected, nil
+}
+
+// partitionManaged separates plugins dshpm may update from user-marked
+// exceptions that remain visible but are never updated automatically.
+func (m *Manager) partitionManaged(plugins []model.Plugin) (managed, unmanaged []model.Plugin) {
+	managed = make([]model.Plugin, 0, len(plugins))
+	for _, plugin := range plugins {
+		if m.Config.IsManaged(plugin.Name) {
+			managed = append(managed, plugin)
+			continue
+		}
+		unmanaged = append(unmanaged, plugin)
+	}
+	return managed, unmanaged
+}
+
+func unmanagedUpdateResults(plugins []model.Plugin, action string) []UpdateResult {
+	results := make([]UpdateResult, 0, len(plugins))
+	for _, plugin := range plugins {
+		results = append(results, UpdateResult{
+			Name:    plugin.Name,
+			Kind:    plugin.Kind,
+			From:    localLabel(plugin),
+			Status:  "skipped",
+			Message: fmt.Sprintf("unmanaged; not %s", action),
+		})
+	}
+	return results
 }
 
 func localLabel(plugin model.Plugin) string {

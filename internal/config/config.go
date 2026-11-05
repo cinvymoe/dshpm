@@ -12,15 +12,16 @@ import (
 
 // Config is the optional user configuration stored at ~/.config/dshpm/config.json.
 type Config struct {
-	DSHHome        string `json:"dshHome,omitempty"`
-	DefaultProfile string `json:"defaultProfile,omitempty"`
-	BackupDir      string `json:"backupDir,omitempty"`
-	WorktreeRoot   string `json:"worktreeRoot,omitempty"`
-	NPMRegistry    string `json:"npmRegistry,omitempty"`
-	PNPMRegistry   string `json:"pnpmRegistry,omitempty"`
-	PNPM           string `json:"pnpm,omitempty"`
-	Git            string `json:"git,omitempty"`
-	GH             string `json:"gh,omitempty"`
+	DSHHome        string   `json:"dshHome,omitempty"`
+	DefaultProfile string   `json:"defaultProfile,omitempty"`
+	BackupDir      string   `json:"backupDir,omitempty"`
+	WorktreeRoot   string   `json:"worktreeRoot,omitempty"`
+	Unmanaged      []string `json:"unmanaged,omitempty"`
+	NPMRegistry    string   `json:"npmRegistry,omitempty"`
+	PNPMRegistry   string   `json:"pnpmRegistry,omitempty"`
+	PNPM           string   `json:"pnpm,omitempty"`
+	Git            string   `json:"git,omitempty"`
+	GH             string   `json:"gh,omitempty"`
 }
 
 // Resolved is a Config with empty values replaced by defaults and paths
@@ -28,6 +29,49 @@ type Config struct {
 type Resolved struct {
 	Config
 	ConfigPath string
+}
+
+// IsManaged reports whether dshpm may update the named plugin.
+func (c Resolved) IsManaged(name string) bool {
+	for _, unmanaged := range c.Unmanaged {
+		if unmanaged == name {
+			return false
+		}
+	}
+	return true
+}
+
+// SetManaged adds or removes a plugin from the unmanaged list.
+func (c *Resolved) SetManaged(name string, managed bool) {
+	if managed {
+		kept := c.Unmanaged[:0]
+		for _, unmanaged := range c.Unmanaged {
+			if unmanaged != name {
+				kept = append(kept, unmanaged)
+			}
+		}
+		c.Unmanaged = kept
+		return
+	}
+	if !c.IsManaged(name) {
+		return
+	}
+	c.Unmanaged = append(c.Unmanaged, name)
+}
+
+// Save writes the effective configuration to ConfigPath.
+func (c Resolved) Save() error {
+	if c.ConfigPath == "" {
+		return errors.New("config path is empty")
+	}
+	data, err := json.MarshalIndent(c.Config, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(c.ConfigPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(c.ConfigPath, append(data, '\n'), 0o644)
 }
 
 // Load reads the default config file when present and applies defaults.

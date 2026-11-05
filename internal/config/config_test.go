@@ -50,3 +50,36 @@ func TestLoadDefaultsWorktreeRootToDataProject(t *testing.T) {
 		t.Fatalf("worktree root = %q, want /data/project/dshpm-worktrees", cfg.WorktreeRoot)
 	}
 }
+
+func TestManagedDefaultsAndSetManaged(t *testing.T) {
+	cfg := Resolved{Config: Config{Unmanaged: []string{"demo"}}}
+	if cfg.IsManaged("demo") {
+		t.Fatal("demo should be unmanaged")
+	}
+	if !cfg.IsManaged("other") {
+		t.Fatal("other should be managed")
+	}
+	cfg.SetManaged("demo", true)
+	if !cfg.IsManaged("demo") {
+		t.Fatal("demo should be managed after SetManaged")
+	}
+	cfg.SetManaged("other", false)
+	if cfg.IsManaged("other") {
+		t.Fatal("other should be unmanaged after SetManaged")
+	}
+}
+
+func TestSaveWritesUnmanagedList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Resolved{Config: Config{Unmanaged: []string{"demo"}}, ConfigPath: path}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.IsManaged("demo") {
+		t.Fatal("saved config should preserve unmanaged demo")
+	}
+}

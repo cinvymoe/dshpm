@@ -30,6 +30,12 @@ install -m 0755 dshpm ~/.local/bin/dshpm
 # 查看默认 profile（优先 web）中的全部插件
 dshpm list
 
+# 标记一个需要手工维护的插件为“不管理”；update/sync/upgrade 会跳过它
+dshpm unmanage dsh-context
+
+# 恢复管理
+dshpm manage dsh-context
+
 # 查看某个 profile，输出机器可读 JSON
 dshpm list --profile web --json
 
@@ -217,6 +223,23 @@ dshpm upgrade --all
 dshpm upgrade dsh-context @dsh-external/dsh-recent-chats --no-build
 ```
 
+## 管理与不管理
+
+dshpm 默认管理 profile 中的全部依赖。需要手工维护或暂时不要自动升级的插件，可以标记为“不管理”：
+
+```sh
+# 标记为不管理（仍会出现在 list 中，但 update/sync/upgrade 会跳过）
+dshpm unmanage @dsh-external/dsh-plugin-manager
+
+# 恢复管理
+dshpm manage @dsh-external/dsh-plugin-manager
+
+# 查看 MANAGED 列：yes 表示会被管理，no 表示跳过自动操作
+dshpm list
+```
+
+`unmanaged` 列表保存在 `~/.config/dshpm/config.json` 的 `unmanaged` 数组中；未列出的插件默认都是 managed。`dshpm unmanage` / `dshpm manage` 会校验插件名必须属于当前 profile，并自动创建配置文件目录。
+
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
@@ -241,6 +264,7 @@ dshpm upgrade dsh-context @dsh-external/dsh-recent-chats --no-build
   "defaultProfile": "web",
   "backupDir": "~/.config/dshpm/backups",
   "worktreeRoot": "/data/project/dshpm-worktrees",
+  "unmanaged": [],
   "npmRegistry": "https://registry.npmjs.org",
   "pnpmRegistry": "https://registry.npmjs.org",
   "pnpm": "pnpm",
@@ -249,13 +273,15 @@ dshpm upgrade dsh-context @dsh-external/dsh-recent-chats --no-build
 }
 ```
 
-`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`worktreeRoot` 是 `sync` 冲突时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
+`unmanaged` 是永不自动更新/同步/升级的插件名列表；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`worktreeRoot` 是 `sync` 冲突时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
 
 ## 命令一览
 
 | 命令 | 作用 |
 | --- | --- |
-| `dshpm list` / `status` | 插件清单、本地/远程版本、变更状态 |
+| `dshpm list` / `status` | 插件清单、本地/远程版本、管理状态、变更状态 |
+| `dshpm manage <name...>` | 标记插件为 managed |
+| `dshpm unmanage <name...>` | 标记插件为 unmanaged（跳过自动升级/同步/更新） |
 | `dshpm backup` | 备份 profile 文件与本地插件 patch |
 | `dshpm restore <dir>` | 恢复备份（默认只做计划） |
 | `dshpm uninstall <name...>` / `remove` | 卸载插件并清理 profile 引用，保留本地源码 |

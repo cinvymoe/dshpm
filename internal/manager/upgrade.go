@@ -42,6 +42,7 @@ func (m *Manager) Upgrade(ctx context.Context, options UpgradeOptions) ([]Update
 	if err != nil {
 		return nil, err
 	}
+	selected, unmanaged := m.partitionManaged(selected)
 	plans := make([]UpdateResult, 0, len(selected))
 	for _, plugin := range selected {
 		if plugin.Kind == model.SourceLocal {
@@ -66,7 +67,7 @@ func (m *Manager) Upgrade(ctx context.Context, options UpgradeOptions) ([]Update
 				plans[index].Status = "would-upgrade"
 			}
 		}
-		return plans, nil
+		return append(plans, unmanagedUpdateResults(unmanaged, "upgraded")...), nil
 	}
 	backupPath := ""
 	if needsBackup && !options.NoBackup {
@@ -103,7 +104,7 @@ func (m *Manager) Upgrade(ctx context.Context, options UpgradeOptions) ([]Update
 			Out:          options.Out,
 		}, backupPath))
 	}
-	return results, nil
+	return append(results, unmanagedUpdateResults(unmanaged, "upgraded")...), nil
 }
 
 func (m *Manager) planLocalUpgrade(plugin model.Plugin, worktreeRoot string) UpdateResult {

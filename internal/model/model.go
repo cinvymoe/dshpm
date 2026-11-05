@@ -20,6 +20,7 @@ type Plugin struct {
 	Name             string     `json:"name"`
 	Spec             string     `json:"spec"`
 	Kind             SourceKind `json:"kind"`
+	Managed          bool       `json:"managed"`
 	LocalDir         string     `json:"localDir,omitempty"`
 	GitURL           string     `json:"gitUrl,omitempty"`
 	GitRef           string     `json:"gitRef,omitempty"`

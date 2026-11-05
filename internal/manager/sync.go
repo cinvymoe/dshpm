@@ -58,6 +58,7 @@ func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, 
 	if err != nil {
 		return nil, err
 	}
+	selected, unmanaged := m.partitionManaged(selected)
 	plans := make([]syncPlan, 0, len(selected))
 	needsBackup := false
 	for _, plugin := range selected {
@@ -67,9 +68,9 @@ func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, 
 		}
 		plans = append(plans, plan)
 	}
-	results := make([]SyncResult, len(plans))
+	results := make([]SyncResult, 0, len(plans)+len(unmanaged))
 	for index := range plans {
-		results[index] = plans[index].result
+		results = append(results, plans[index].result)
 	}
 	if !needsBackup || options.DryRun {
 		if options.DryRun {
@@ -79,7 +80,7 @@ func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, 
 				}
 			}
 		}
-		return results, nil
+		return append(results, unmanagedSyncResults(unmanaged)...), nil
 	}
 	backupPath := ""
 	if !options.NoBackup {
@@ -102,7 +103,7 @@ func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, 
 		}
 		results[index] = m.applySync(ctx, selected[index], plans[index], options, backupPath)
 	}
-	return results, nil
+	return append(results, unmanagedSyncResults(unmanaged)...), nil
 }
 
 func (m *Manager) planSync(plugin model.Plugin, worktreeRoot string) syncPlan {
@@ -275,6 +276,20 @@ func firstLine(value string) string {
 		return value[:index]
 	}
 	return value
+}
+
+func unmanagedSyncResults(plugins []model.Plugin) []SyncResult {
+	results := make([]SyncResult, 0, len(plugins))
+	for _, plugin := range plugins {
+		results = append(results, SyncResult{
+			Name:    plugin.Name,
+			Kind:    plugin.Kind,
+			From:    versionAndCommit(plugin.InstalledVersion, plugin.LocalCommit),
+			Status:  "skipped",
+			Message: "unmanaged; not synced",
+		})
+	}
+	return results
 }
 
 func (m *Manager) refreshWorktree(plugin model.Plugin, options SyncOptions, target string) error {

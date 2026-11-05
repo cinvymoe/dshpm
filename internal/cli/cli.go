@@ -27,8 +27,10 @@ Usage:
   dshpm <command> [options]
 
 Commands:
-  list                 Show plugins with local and remote versions
+  list                 Show plugins, versions, and management status
   status               Alias for list
+  manage <names...>    Mark plugins as managed by dshpm
+  unmanage <names...>  Mark plugins as unmanaged (skipped by update/sync/upgrade)
   backup               Back up profile manifests and local plugin patches
   restore <archive>    Restore a backup (plan only unless --apply)
   uninstall <names...> Remove plugins from the profile (keeps local sources)
@@ -70,6 +72,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "list", "ls", "status":
 		return runList(rest, stdout, stderr)
+	case "manage":
+		return runManage(rest, stdout, stderr, true)
+	case "unmanage":
+		return runManage(rest, stdout, stderr, false)
 	case "backup":
 		return runBackup(rest, stdout, stderr)
 	case "restore":
@@ -167,10 +173,11 @@ func runList(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "PROFILE %s  (%s)\n\n", instance.Profile.Name, instance.Profile.Dir)
 	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-	fmt.Fprintln(writer, "PLUGIN\tKIND\tLOCAL VERSION\tREMOTE VERSION\tCHANGES\tSTATUS")
+	fmt.Fprintln(writer, "PLUGIN\tMANAGED\tKIND\tLOCAL VERSION\tREMOTE VERSION\tCHANGES\tSTATUS")
 	for _, plugin := range plugins {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			plugin.Name,
+			managedLabel(plugin),
 			plugin.Kind,
 			localVersion(plugin),
 			remoteVersion(plugin),
@@ -179,6 +186,51 @@ func runList(args []string, stdout, stderr io.Writer) int {
 		)
 	}
 	_ = writer.Flush()
+	return 0
+}
+
+func runManage(args []string, stdout, stderr io.Writer, managed bool) int {
+	command := "manage"
+	state := "MANAGED"
+	if !managed {
+		command = "unmanage"
+		state = "UNMANAGED"
+	}
+	set := flag.NewFlagSet(command, flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true})
+	if err != nil {
+		return 2
+	}
+	if len(positionals) == 0 {
+		fmt.Fprintf(stderr, "dshpm %s: at least one plugin name is required\n", command)
+		return 2
+	}
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	for _, name := range positionals {
+		if _, ok := instance.Profile.Dependencies[name]; !ok {
+			fmt.Fprintf(stderr, "dshpm %s: plugin %q is not a dependency of profile %s\n", command, name, instance.Profile.Name)
+			return 1
+		}
+		instance.Config.SetManaged(name, managed)
+	}
+	if err := instance.Config.Save(); err != nil {
+		fmt.Fprintf(stderr, "dshpm: save config: %v\n", err)
+		return 1
+	}
+	if options.json {
+		writeJSON(stdout, map[string]any{"profile": instance.Profile.Name, "managed": managed, "plugins": positionals})
+		return 0
+	}
+	for _, name := range positionals {
+		fmt.Fprintf(stdout, "%s\t%s\n", state, name)
+	}
 	return 0
 }
 
@@ -252,6 +304,13 @@ func statusLabel(plugin model.Plugin) string {
 		return plugin.Status + " (" + plugin.Error + ")"
 	}
 	return plugin.Status
+}
+
+func managedLabel(plugin model.Plugin) string {
+	if plugin.Managed {
+		return "yes"
+	}
+	return "no"
 }
 
 func runBackup(args []string, stdout, stderr io.Writer) int {
