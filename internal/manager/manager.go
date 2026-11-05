@@ -202,6 +202,7 @@ type UpdateResult struct {
 	Status      string           `json:"status"`
 	Message     string           `json:"message,omitempty"`
 	BackupPath  string           `json:"backupPath,omitempty"`
+	BuildSource LocalBuildSource `json:"buildSource,omitempty"`
 	WorktreeDir string           `json:"worktreeDir,omitempty"`
 	WorktreeRef string           `json:"worktreeRef,omitempty"`
 }

@@ -33,6 +33,7 @@ func syncFixture(t *testing.T) (home, upstream, clone string) {
 	run(t, upstream, "config", "user.email", "test@example.com")
 	run(t, upstream, "config", "user.name", "test")
 	writeFile(t, filepath.Join(upstream, "a.txt"), "base\n")
+	writeFile(t, filepath.Join(upstream, "package.json"), `{"name":"demo","scripts":{"build":"true"}}`)
 	run(t, upstream, "add", ".")
 	run(t, upstream, "commit", "-m", "initial")
 	if err := os.MkdirAll(filepath.Dir(clone), 0o755); err != nil {
@@ -244,6 +245,138 @@ func TestUpgradeSwitchesProfileToWorktree(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"link:`+syncResults[0].WorktreeDir+`"`) {
 		t.Fatalf("profile was not switched to worktree: %s", data)
+	}
+}
+
+func useFakePNPM(t *testing.T, home string, instance *Manager) string {
+	t.Helper()
+	logPath := filepath.Join(home, "pnpm.log")
+	pnpm := filepath.Join(home, "pnpm")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + logPath + "\n"
+	if err := os.WriteFile(pnpm, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	instance.Config.PNPM = pnpm
+	return logPath
+}
+
+func TestUpgradeLocalBuildRebasesAndBuilds(t *testing.T) {
+	home, upstream, clone := syncFixture(t)
+	writeFile(t, filepath.Join(clone, "local.txt"), "local\n")
+	run(t, clone, "add", ".")
+	run(t, clone, "commit", "-m", "local")
+	writeFile(t, filepath.Join(upstream, "upstream.txt"), "upstream\n")
+	run(t, upstream, "add", ".")
+	run(t, upstream, "commit", "-m", "upstream")
+	instance := newTestManager(t, home, clone)
+	logPath := useFakePNPM(t, home, instance)
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
+		Names:       []string{"demo"},
+		NoBackup:    true,
+		BuildSource: BuildSourceLocal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "upgraded" {
+		t.Fatalf("results = %+v", results)
+	}
+	if results[0].BuildSource != BuildSourceLocal {
+		t.Fatalf("build source = %q", results[0].BuildSource)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "local.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "upstream.txt")); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(log), "build") {
+		t.Fatalf("build was not invoked: %q (%v)", log, err)
+	}
+}
+
+func TestUpgradeLocalBuildBlocksDirtyCheckout(t *testing.T) {
+	home, _, clone := syncFixture(t)
+	writeFile(t, filepath.Join(clone, "dirty.txt"), "dirty\n")
+	instance := newTestManager(t, home, clone)
+	logPath := useFakePNPM(t, home, instance)
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
+		Names:       []string{"demo"},
+		NoBackup:    true,
+		BuildSource: BuildSourceLocal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "rebase-blocked" {
+		t.Fatalf("results = %+v", results)
+	}
+	if !strings.Contains(results[0].Message, "manual handling") {
+		t.Fatalf("message = %q", results[0].Message)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("build should not run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "dirty.txt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpgradeLocalBuildRebaseConflictSkipsUpgrade(t *testing.T) {
+	home, upstream, clone := syncFixture(t)
+	writeFile(t, filepath.Join(clone, "a.txt"), "local\n")
+	run(t, clone, "commit", "-am", "local")
+	writeFile(t, filepath.Join(upstream, "a.txt"), "upstream\n")
+	run(t, upstream, "commit", "-am", "upstream")
+	before, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := newTestManager(t, home, clone)
+	logPath := useFakePNPM(t, home, instance)
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
+		Names:       []string{"demo"},
+		NoBackup:    true,
+		BuildSource: BuildSourceLocal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "rebase-failed" {
+		t.Fatalf("results = %+v", results)
+	}
+	if !strings.Contains(results[0].Message, "manual handling") {
+		t.Fatalf("message = %q", results[0].Message)
+	}
+	after, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("HEAD changed after failed rebase: %s -> %s", before, after)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("build should not run: %v", err)
+	}
+}
+
+func TestUpgradeWorktreeSourceRequiresWorktree(t *testing.T) {
+	home, _, clone := syncFixture(t)
+	instance := newTestManager(t, home, clone)
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
+		Names:       []string{"demo"},
+		NoBackup:    true,
+		BuildSource: BuildSourceWorktree,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "worktree-missing" {
+		t.Fatalf("results = %+v", results)
+	}
+	if !strings.Contains(results[0].Message, "dshpm sync") {
+		t.Fatalf("message = %q", results[0].Message)
 	}
 }
 

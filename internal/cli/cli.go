@@ -39,7 +39,7 @@ Commands:
   rollback [id|path]   Restore a historical backup (plan unless --apply)
   publish [names...]   Publish local plugins to GitHub through gh
   sync [names...]      Sync local git checkouts with remote (rebase/worktree)
-  upgrade [names...]   Upgrade plugins; local checkouts build from local or worktree
+  upgrade [names...]   Upgrade plugins; choose --build-source auto|worktree|local
   update [names...]    Update plugins with the legacy patch-based flow
   profiles             List DSH profiles and dependency counts
   doctor               Check the runtime environment
@@ -501,8 +501,9 @@ func runUpgrade(args []string, stdout, stderr io.Writer) int {
 	dryRun := set.Bool("dry-run", false, "plan only")
 	noBackup := set.Bool("no-backup", false, "skip the pre-upgrade backup")
 	noBuild := set.Bool("no-build", false, "skip building local checkouts")
+	buildSource := set.String("build-source", string(manager.BuildSourceAuto), "local build source: auto, worktree, or local")
 	worktreeRoot := set.String("worktree-root", "", "worktree root directory")
-	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "worktree-root": true})
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true, "build-source": true, "worktree-root": true})
 	if err != nil {
 		return 2
 	}
@@ -517,6 +518,7 @@ func runUpgrade(args []string, stdout, stderr io.Writer) int {
 		DryRun:       *dryRun,
 		NoBackup:     *noBackup,
 		NoBuild:      *noBuild,
+		BuildSource:  manager.LocalBuildSource(*buildSource),
 		BackupDir:    instance.Config.BackupDir,
 		WorktreeRoot: *worktreeRoot,
 		Out:          stdout,
@@ -530,12 +532,17 @@ func runUpgrade(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-	fmt.Fprintln(writer, "PLUGIN\tKIND\tFROM\tTO\tRESULT\tWORKTREE")
+	fmt.Fprintln(writer, "PLUGIN\tKIND\tFROM\tTO\tBUILD\tRESULT\tWORKTREE")
 	failures := 0
 	for _, result := range results {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			result.Name, result.Kind, result.From, result.To, resultLabel(result), result.WorktreeDir)
-		if result.Status == "failed" || result.Status == "error" || result.Status == "build-failed" {
+		build := string(result.BuildSource)
+		if build == "" {
+			build = "-"
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			result.Name, result.Kind, result.From, result.To, build, resultLabel(result), result.WorktreeDir)
+		switch result.Status {
+		case "failed", "error", "build-failed", "rebase-blocked", "rebase-failed", "worktree-missing":
 			failures++
 		}
 	}

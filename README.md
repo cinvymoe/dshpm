@@ -4,7 +4,7 @@
 
 - **区分本地版本和远程版本**：同时显示本地已安装版本 / 本地 checkout 的 commit，以及 npm registry 或 git 上游的最新版本。
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
-- **同步与升级**：`sync` 对 git 本地 checkout 做 fetch + fast-forward/rebase；有未提交改动或 rebase 冲突时，把远程版本检出到独立 worktree，不碰本地修改。`upgrade` 对 npm/git 依赖走 pnpm；本地 checkout 有 worktree 时构建 worktree 并把 profile 切到该 worktree，没有 worktree 时构建本地 checkout。`update` 保留旧的 patch 流程。
+- **同步与升级**：`sync` 对 git 本地 checkout 做 fetch + fast-forward/rebase；有未提交改动或 rebase 冲突时，把远程版本检出到独立 worktree，不碰本地修改。`upgrade` 对 npm/git 依赖走 pnpm；本地 checkout 可用 `--build-source worktree` 构建远程 worktree 并切换 profile，或用 `--build-source local` 先 rebase 本地修改再构建；rebase 失败会跳过升级并提示手动处理。`update` 保留旧的 patch 流程。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
 - **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release；发布成功后默认把 profile 依赖切到 `github:OWNER/REPO` 远程管理。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
@@ -18,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.1" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.5" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -207,7 +207,13 @@ dshpm publish --all-local --visibility private
 - 工作区有未提交改动或 rebase 冲突时，**不改本地 checkout**，而是把远程版本检出到独立 worktree：默认 `/data/project/dshpm-worktrees/<profile>/<plugin>`；
 - `dshpm list` 会将该插件标记为 `worktree`，`CHANGES` 显示 `worktree:<ref>`。
 
-`upgrade` 复用 `update` 的 npm/git 升级路径；本地 checkout 有 worktree 时在 worktree 构建，并在成功后把 profile 依赖切到 `link:<worktree>` 后执行 `pnpm install`；没有 worktree 时构建本地 checkout。`--no-build` 只更新依赖，不运行构建（存在 worktree 时也不会切换 profile）。
+`upgrade` 复用 `update` 的 npm/git 升级路径。本地 checkout 的构建源由 `--build-source` 选择：
+
+- `auto`（默认）：有已注册的远程 worktree 就构建 worktree，否则走本地构建；
+- `worktree`：只构建 `sync` 生成的远程 worktree，成功后把 profile 依赖切到 `link:<worktree>` 并执行 `pnpm install`；没有 worktree 时提示先执行 `dshpm sync`，不会偷偷构建本地目录；
+- `local`：先检查本地 checkout 是否可以安全 rebase 到上游；干净且落后/分叉时先 rebase，然后构建本地修改；有未提交改动或 rebase 冲突时**不升级**，状态为 `rebase-blocked` / `rebase-failed`，本地目录保持原样，由你手动处理。
+
+`--no-build` 只更新依赖，不运行构建；存在 worktree 时也不会切换 profile。
 
 ```sh
 # 先看同步计划
@@ -216,8 +222,14 @@ dshpm sync --all --dry-run
 # 同步全部本地 git 插件；冲突时生成 worktree
 dshpm sync --all
 
-# 升级全部插件；若 sync 已生成 worktree，会构建并切换过去
+# 升级全部插件；auto 模式：有 worktree 就构建 worktree，否则构建本地
 dshpm upgrade --all
+
+# 强制从远程 worktree 构建（适合本地有改动、已 sync 出 worktree）
+dshpm upgrade dsh-superagent --build-source worktree
+
+# 构建本地修改；会先 rebase，rebase 失败则不升级并提示手动处理
+dshpm upgrade dsh-superagent --build-source local
 
 # 只升级指定插件，跳过构建
 dshpm upgrade dsh-context @dsh-external/dsh-recent-chats --no-build
@@ -289,7 +301,7 @@ dshpm list
 | `dshpm rollback [id]` | 还原历史备份（默认只做计划） |
 | `dshpm publish <name...>` / `--all-local` | 通过 gh 发布本地插件；`--dry-run` 只做计划 |
 | `dshpm sync <name...>` / `--all` | 同步本地 git checkout；冲突时生成远程 worktree |
-| `dshpm upgrade <name...>` / `--all` | 升级插件并构建本地/worktree；`--dry-run` 只做计划 |
+| `dshpm upgrade <name...>` / `--all` | 升级插件；`--build-source auto\|worktree\|local` 选择本地构建源 |
 | `dshpm update <name...>` / `--all` | 旧的 patch 式更新；`--dry-run` 只做计划 |
 | `dshpm profiles` | 列出 profile 与依赖数量 |
 | `dshpm doctor` | 检查 DSH 目录、git、pnpm |
