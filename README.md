@@ -18,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.6" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.7" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -35,6 +35,10 @@ dshpm unmanage dsh-context
 
 # 恢复管理
 dshpm manage dsh-context
+
+# 把带远程的本地插件切换为 local 模式；auto 恢复自动分类
+dshpm mode local dsh-superagent
+dshpm mode auto dsh-superagent
 
 # 查看某个 profile，输出机器可读 JSON
 dshpm list --profile web --json
@@ -258,6 +262,17 @@ dshpm list
 
 `unmanaged` 列表保存在 `~/.config/dshpm/config.json` 的 `unmanaged` 数组中；未列出的插件默认都是 managed。`dshpm unmanage` / `dshpm manage` 会校验插件名必须属于当前 profile，并自动创建配置文件目录。
 
+## 本地模式切换
+
+带远程 Git 的本地 checkout 默认自动识别为 `local-remote`。如果希望把它按 `local` 处理（直接在本地目录构建、不创建 worktree），可以显式切换：
+
+```sh
+dshpm mode local dsh-superagent
+dshpm mode auto dsh-superagent
+```
+
+`local` 覆盖保存在 `~/.config/dshpm/config.json` 的 `modes` 对象中，例如 `{"dsh-superagent":"local"}`；`auto` 会删除覆盖并恢复自动分类。切换到 `local` 后，`upgrade` 直接在本地目录构建，`sync` 按本地 git checkout 做 rebase/fast-forward，不再创建 worktree。
+
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
@@ -280,6 +295,7 @@ dshpm list
   "backupDir": "~/.config/dshpm/backups",
   "worktreeRoot": "/data/project/dshpm-worktrees",
   "unmanaged": [],
+  "modes": {},
   "npmRegistry": "https://registry.npmjs.org",
   "pnpmRegistry": "https://registry.npmjs.org",
   "pnpm": "pnpm",
@@ -288,7 +304,7 @@ dshpm list
 }
 ```
 
-`unmanaged` 是永不自动更新/同步/升级的插件名列表；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`worktreeRoot` 是 `local-remote` 同步时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
+`unmanaged` 是永不自动更新/同步/升级的插件名列表；`modes` 是本地插件的模式覆盖（目前支持 `{"dsh-superagent":"local"}`）；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`worktreeRoot` 是 `local-remote` 同步时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
 
 ## 命令一览
 
@@ -297,6 +313,7 @@ dshpm list
 | `dshpm list` / `status` | 插件清单、本地/远程版本、管理状态、变更状态 |
 | `dshpm manage <name...>` | 标记插件为 managed |
 | `dshpm unmanage <name...>` | 标记插件为 unmanaged（跳过自动升级/同步/更新） |
+| `dshpm mode local\|auto <name...>` | 切换本地插件的模式（local 覆盖 / 恢复 auto） |
 | `dshpm backup` | 备份 profile 文件与本地插件 patch |
 | `dshpm restore <dir>` | 恢复备份（默认只做计划） |
 | `dshpm uninstall <name...>` / `remove` | 卸载插件并清理 profile 引用，保留本地源码 |

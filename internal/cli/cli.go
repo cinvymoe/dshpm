@@ -31,6 +31,8 @@ Commands:
   status               Alias for list
   manage <names...>    Mark plugins as managed by dshpm
   unmanage <names...>  Mark plugins as unmanaged (skipped by update/sync/upgrade)
+  mode <local|auto> <names...>
+                       Force local mode or restore automatic classification
   backup               Back up profile manifests and local plugin patches
   restore <archive>    Restore a backup (plan only unless --apply)
   uninstall <names...> Remove plugins from the profile (keeps local sources)
@@ -76,6 +78,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runManage(rest, stdout, stderr, true)
 	case "unmanage":
 		return runManage(rest, stdout, stderr, false)
+	case "mode":
+		return runMode(rest, stdout, stderr)
 	case "backup":
 		return runBackup(rest, stdout, stderr)
 	case "restore":
@@ -230,6 +234,54 @@ func runManage(args []string, stdout, stderr io.Writer, managed bool) int {
 	}
 	for _, name := range positionals {
 		fmt.Fprintf(stdout, "%s\t%s\n", state, name)
+	}
+	return 0
+}
+
+func runMode(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("mode", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options commonOptions
+	addCommonFlags(set, &options)
+	positionals, err := parseInterspersed(set, args, map[string]bool{"profile": true, "dsh-home": true, "config": true})
+	if err != nil {
+		return 2
+	}
+	if len(positionals) < 2 {
+		fmt.Fprintln(stderr, "dshpm mode: usage: dshpm mode <local|auto> <names...>")
+		return 2
+	}
+	mode := strings.ToLower(positionals[0])
+	if mode != "local" && mode != "auto" {
+		fmt.Fprintf(stderr, "dshpm mode: invalid mode %q (want local or auto)\n", positionals[0])
+		return 2
+	}
+	names := positionals[1:]
+	instance, err := newManager(options)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	for _, name := range names {
+		if _, ok := instance.Profile.Dependencies[name]; !ok {
+			fmt.Fprintf(stderr, "dshpm mode: plugin %q is not a dependency of profile %s\n", name, instance.Profile.Name)
+			return 1
+		}
+		if err := instance.Config.SetMode(name, mode); err != nil {
+			fmt.Fprintf(stderr, "dshpm mode: %v\n", err)
+			return 2
+		}
+	}
+	if err := instance.Config.Save(); err != nil {
+		fmt.Fprintf(stderr, "dshpm: save config: %v\n", err)
+		return 1
+	}
+	if options.json {
+		writeJSON(stdout, map[string]any{"profile": instance.Profile.Name, "mode": mode, "plugins": names})
+		return 0
+	}
+	for _, name := range names {
+		fmt.Fprintf(stdout, "MODE\t%s\t%s\n", name, mode)
 	}
 	return 0
 }

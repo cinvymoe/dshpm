@@ -119,3 +119,27 @@ func TestRunManageWritesConfig(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
+
+func TestRunModeWritesConfig(t *testing.T) {
+	home := t.TempDir()
+	profileDir := filepath.Join(home, "profiles", "web")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "package.json"), []byte(`{"dependencies":{"demo":"link:/tmp/demo"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "config.json")
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"mode", "local", "demo", "--dsh-home", home, "--profile", "web", "--config", configPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"modes"`) || !strings.Contains(string(data), `"demo": "local"`) {
+		t.Fatalf("config = %s", data)
+	}
+}

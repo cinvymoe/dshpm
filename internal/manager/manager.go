@@ -43,6 +43,7 @@ func New(cfg config.Resolved, profileName string) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	loaded.Modes = cfg.Modes
 	return &Manager{
 		Config:   cfg,
 		Profile:  loaded,

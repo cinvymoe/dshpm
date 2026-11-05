@@ -19,6 +19,7 @@ type Profile struct {
 	Dir          string
 	Dependencies map[string]string
 	Bundles      []string
+	Modes        map[string]string
 	raw          map[string]json.RawMessage
 }
 
@@ -146,6 +147,9 @@ func (p *Profile) Plugins() []model.Plugin {
 			if plugin.GitURL != "" {
 				plugin.Kind = model.SourceLocalRemote
 			}
+		}
+		if p.Modes[name] == "local" {
+			plugin.Kind = model.SourceLocal
 		}
 		plugins = append(plugins, plugin)
 	}

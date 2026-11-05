@@ -12,16 +12,17 @@ import (
 
 // Config is the optional user configuration stored at ~/.config/dshpm/config.json.
 type Config struct {
-	DSHHome        string   `json:"dshHome,omitempty"`
-	DefaultProfile string   `json:"defaultProfile,omitempty"`
-	BackupDir      string   `json:"backupDir,omitempty"`
-	WorktreeRoot   string   `json:"worktreeRoot,omitempty"`
-	Unmanaged      []string `json:"unmanaged,omitempty"`
-	NPMRegistry    string   `json:"npmRegistry,omitempty"`
-	PNPMRegistry   string   `json:"pnpmRegistry,omitempty"`
-	PNPM           string   `json:"pnpm,omitempty"`
-	Git            string   `json:"git,omitempty"`
-	GH             string   `json:"gh,omitempty"`
+	DSHHome        string            `json:"dshHome,omitempty"`
+	DefaultProfile string            `json:"defaultProfile,omitempty"`
+	BackupDir      string            `json:"backupDir,omitempty"`
+	WorktreeRoot   string            `json:"worktreeRoot,omitempty"`
+	Unmanaged      []string          `json:"unmanaged,omitempty"`
+	Modes          map[string]string `json:"modes,omitempty"`
+	NPMRegistry    string            `json:"npmRegistry,omitempty"`
+	PNPMRegistry   string            `json:"pnpmRegistry,omitempty"`
+	PNPM           string            `json:"pnpm,omitempty"`
+	Git            string            `json:"git,omitempty"`
+	GH             string            `json:"gh,omitempty"`
 }
 
 // Resolved is a Config with empty values replaced by defaults and paths
@@ -57,6 +58,33 @@ func (c *Resolved) SetManaged(name string, managed bool) {
 		return
 	}
 	c.Unmanaged = append(c.Unmanaged, name)
+}
+
+// Mode returns the configured local mode for a plugin. An empty value means
+// automatic classification.
+func (c Resolved) Mode(name string) string {
+	return c.Modes[name]
+}
+
+// SetMode sets or clears a plugin's local mode. Supported modes are "local"
+// and "auto"; an empty mode is treated as "auto".
+func (c *Resolved) SetMode(name, mode string) error {
+	switch strings.TrimSpace(mode) {
+	case "", "auto":
+		delete(c.Modes, name)
+		if len(c.Modes) == 0 {
+			c.Modes = nil
+		}
+		return nil
+	case "local":
+		if c.Modes == nil {
+			c.Modes = make(map[string]string)
+		}
+		c.Modes[name] = "local"
+		return nil
+	default:
+		return fmt.Errorf("invalid mode %q (want local or auto)", mode)
+	}
 }
 
 // Save writes the effective configuration to ConfigPath.

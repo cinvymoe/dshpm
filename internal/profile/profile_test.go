@@ -210,4 +210,10 @@ func TestPluginsClassifiesLocalRemote(t *testing.T) {
 	if byName["remote"].GitURL != "https://example.com/remote.git" {
 		t.Fatalf("remote URL = %q", byName["remote"].GitURL)
 	}
+	p.Modes = map[string]string{"remote": "local"}
+	for _, plugin := range p.Plugins() {
+		if plugin.Name == "remote" && plugin.Kind != model.SourceLocal {
+			t.Fatalf("forced local kind = %q", plugin.Kind)
+		}
+	}
 }

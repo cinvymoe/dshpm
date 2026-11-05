@@ -83,3 +83,30 @@ func TestSaveWritesUnmanagedList(t *testing.T) {
 		t.Fatal("saved config should preserve unmanaged demo")
 	}
 }
+
+func TestSetModePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Resolved{Config: Config{}, ConfigPath: path}
+	if err := cfg.SetMode("demo", "local"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode("demo") != "local" {
+		t.Fatalf("mode = %q, want local", cfg.Mode("demo"))
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Mode("demo") != "local" {
+		t.Fatalf("loaded mode = %q, want local", loaded.Mode("demo"))
+	}
+	if err := loaded.SetMode("demo", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Mode("demo") != "" {
+		t.Fatalf("mode after auto = %q, want empty", loaded.Mode("demo"))
+	}
+}
