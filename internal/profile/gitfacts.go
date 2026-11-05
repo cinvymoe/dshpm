@@ -10,6 +10,10 @@ func FillLocalGitFacts(plugin *model.Plugin) {
 	if plugin.LocalDir == "" || !gitutil.IsRepository(plugin.LocalDir) {
 		return
 	}
+	plugin.GitURL = gitutil.RemoteURL(plugin.LocalDir, "origin")
+	if plugin.GitURL == "" {
+		plugin.GitURL = gitutil.FirstRemoteURL(plugin.LocalDir)
+	}
 	plugin.LocalCommit = gitutil.ShortHead(plugin.LocalDir)
 	plugin.Branch = gitutil.Branch(plugin.LocalDir)
 	plugin.Upstream = gitutil.Upstream(plugin.LocalDir)

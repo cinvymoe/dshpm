@@ -38,7 +38,7 @@ Commands:
   history              List backups for the selected profile
   rollback [id|path]   Restore a historical backup (plan unless --apply)
   publish [names...]   Publish local plugins to GitHub through gh
-  sync [names...]      Sync local git checkouts with remote (rebase/worktree)
+  sync [names...]      Sync local-remote checkouts into a remote worktree
   upgrade [names...]   Upgrade plugins; choose --build-source auto|worktree|local
   update [names...]    Update plugins with the legacy patch-based flow
   profiles             List DSH profiles and dependency counts

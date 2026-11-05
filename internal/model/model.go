@@ -7,8 +7,13 @@ type SourceKind string
 const (
 	// SourceRegistry is an npm registry dependency (a version or range).
 	SourceRegistry SourceKind = "registry"
-	// SourceLocal is a filesystem dependency such as link: or file:.
+	// SourceLocal is a filesystem dependency such as link: or file: that
+	// has no remote Git repository.
 	SourceLocal SourceKind = "local"
+	// SourceLocalRemote is a filesystem dependency whose checkout tracks a
+	// remote Git repository. dshpm never modifies or rebases this checkout;
+	// sync and upgrade operate on a separate remote worktree.
+	SourceLocalRemote SourceKind = "local-remote"
 	// SourceGit is a git dependency such as github:owner/repo.
 	SourceGit SourceKind = "git"
 	// SourceTarball is a remote tarball dependency.

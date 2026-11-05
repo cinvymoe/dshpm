@@ -3,6 +3,7 @@ package profile
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -141,5 +142,72 @@ func TestSetDependency(t *testing.T) {
 	}
 	if err := p.SetDependency("missing", "1.0.0"); err == nil {
 		t.Fatal("expected an error for an undeclared dependency")
+	}
+}
+
+func TestPluginsClassifiesLocalRemote(t *testing.T) {
+	home := t.TempDir()
+	localDir := filepath.Join(home, "external", "plain")
+	remoteDir := filepath.Join(home, "external", "remote")
+	for _, dir := range []string{localDir, remoteDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".."), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	runGit(remoteDir, "init", "-b", "main")
+	runGit(remoteDir, "config", "user.email", "test@example.com")
+	runGit(remoteDir, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(remoteDir, "package.json"), []byte(`{"name":"remote","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(remoteDir, "add", ".")
+	runGit(remoteDir, "commit", "-m", "initial")
+	runGit(remoteDir, "remote", "add", "origin", "https://example.com/remote.git")
+	if err := os.WriteFile(filepath.Join(localDir, "package.json"), []byte(`{"name":"plain"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	profileDir := filepath.Join(home, "profiles", "web")
+	if err := os.MkdirAll(filepath.Join(profileDir, "node_modules", "plain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(profileDir, "node_modules", "remote"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "node_modules", "plain", "package.json"), []byte(`{"name":"plain","version":"0.1.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "node_modules", "remote", "package.json"), []byte(`{"name":"remote","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "package.json"), []byte(`{"dependencies":{"plain":"link:`+localDir+`","remote":"link:`+remoteDir+`"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(home, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]model.Plugin{}
+	for _, plugin := range p.Plugins() {
+		byName[plugin.Name] = plugin
+	}
+	if byName["plain"].Kind != model.SourceLocal {
+		t.Fatalf("plain kind = %q", byName["plain"].Kind)
+	}
+	if byName["remote"].Kind != model.SourceLocalRemote {
+		t.Fatalf("remote kind = %q", byName["remote"].Kind)
+	}
+	if byName["remote"].GitURL != "https://example.com/remote.git" {
+		t.Fatalf("remote URL = %q", byName["remote"].GitURL)
 	}
 }

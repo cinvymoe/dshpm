@@ -95,7 +95,7 @@ func (m *Manager) Enrich(plugin *model.Plugin) {
 		default:
 			plugin.Status = "update"
 		}
-	case model.SourceLocal:
+	case model.SourceLocal, model.SourceLocalRemote:
 		if plugin.LocalDir == "" {
 			plugin.Status = "missing"
 			return
@@ -111,6 +111,9 @@ func (m *Manager) Enrich(plugin *model.Plugin) {
 		gitURL := plugin.GitURL
 		if gitURL == "" {
 			gitURL = gitutil.RemoteURL(plugin.LocalDir, "origin")
+			if gitURL == "" {
+				gitURL = gitutil.FirstRemoteURL(plugin.LocalDir)
+			}
 		}
 		if gitURL == "" {
 			plugin.Status = "local-only"
@@ -125,6 +128,17 @@ func (m *Manager) Enrich(plugin *model.Plugin) {
 		plugin.GitURL = gitURL
 		plugin.RemoteCommit = head.Commit
 		plugin.RemoteVersion = head.Ref
+		if plugin.Kind == model.SourceLocalRemote {
+			// local-remote checkouts are never managed in place; their local
+			// dirty/ahead state is informational only and must not affect sync
+			// or upgrade decisions.
+			if plugin.WorktreeUsed {
+				plugin.Status = "worktree"
+			} else {
+				plugin.Status = "local-remote"
+			}
+			return
+		}
 		fullHead, _ := gitutil.Head(plugin.LocalDir)
 		switch {
 		case plugin.Dirty > 0:
@@ -139,9 +153,6 @@ func (m *Manager) Enrich(plugin *model.Plugin) {
 			plugin.Status = "up-to-date"
 		default:
 			plugin.Status = "remote-diff"
-		}
-		if plugin.WorktreeUsed {
-			plugin.Status = "worktree"
 		}
 	case model.SourceTarball:
 		plugin.Status = "pinned"
@@ -302,6 +313,9 @@ func (m *Manager) planOne(plugin model.Plugin, options UpdateOptions) (UpdateRes
 			return result, false, nil
 		}
 		result.Status = "planned"
+	case model.SourceLocalRemote:
+		result.Status = "skipped"
+		result.Message = "local-remote uses dshpm sync + upgrade; update does not touch the local checkout"
 	case model.SourceLocal:
 		updated, result, candidate, err := m.planLocal(plugin)
 		if err != nil {

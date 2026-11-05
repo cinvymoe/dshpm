@@ -45,6 +45,23 @@ func syncFixture(t *testing.T) (home, upstream, clone string) {
 	return home, upstream, clone
 }
 
+func pureLocalFixture(t *testing.T) (home, clone string) {
+	t.Helper()
+	home = t.TempDir()
+	clone = filepath.Join(home, "external", "demo")
+	if err := os.MkdirAll(clone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, clone, "init", "-b", "main")
+	run(t, clone, "config", "user.email", "test@example.com")
+	run(t, clone, "config", "user.name", "test")
+	writeFile(t, filepath.Join(clone, "package.json"), `{"name":"demo","scripts":{"build":"true"}}`)
+	writeFile(t, filepath.Join(clone, "a.txt"), "base\n")
+	run(t, clone, "add", ".")
+	run(t, clone, "commit", "-m", "initial")
+	return home, clone
+}
+
 func newTestManager(t *testing.T, home, clone string) *Manager {
 	t.Helper()
 	writeProfile(t, home, "web", `{"dependencies":{"demo":"link:`+clone+`"}}`)
@@ -62,7 +79,7 @@ func newTestManager(t *testing.T, home, clone string) *Manager {
 	return instance
 }
 
-func TestSyncFastForwardsCleanCheckout(t *testing.T) {
+func TestSyncLocalRemoteUsesWorktree(t *testing.T) {
 	home, upstream, clone := syncFixture(t)
 	writeFile(t, filepath.Join(upstream, "b.txt"), "second\n")
 	run(t, upstream, "add", ".")
@@ -72,15 +89,18 @@ func TestSyncFastForwardsCleanCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != "synced" {
+	if len(results) != 1 || results[0].Status != "worktree" {
 		t.Fatalf("results = %+v", results)
 	}
-	if _, err := os.Stat(filepath.Join(clone, "b.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(clone, "b.txt")); !os.IsNotExist(err) {
+		t.Fatalf("local checkout should be untouched: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(results[0].WorktreeDir, "b.txt")); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSyncRebasesLocalCommit(t *testing.T) {
+func TestSyncLocalRemoteLeavesLocalCommitUntouched(t *testing.T) {
 	home, upstream, clone := syncFixture(t)
 	writeFile(t, filepath.Join(clone, "local.txt"), "local\n")
 	run(t, clone, "add", ".")
@@ -88,18 +108,29 @@ func TestSyncRebasesLocalCommit(t *testing.T) {
 	writeFile(t, filepath.Join(upstream, "upstream.txt"), "upstream\n")
 	run(t, upstream, "add", ".")
 	run(t, upstream, "commit", "-m", "upstream")
+	before, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
 	instance := newTestManager(t, home, clone)
 	results, err := instance.Sync(context.Background(), SyncOptions{Names: []string{"demo"}, NoBackup: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != "synced" {
+	if len(results) != 1 || results[0].Status != "worktree" {
 		t.Fatalf("results = %+v", results)
 	}
-	if _, err := os.Stat(filepath.Join(clone, "upstream.txt")); err != nil {
+	after, err := gitutil.Head(clone)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(clone, "local.txt")); err != nil {
+	if before != after {
+		t.Fatalf("local HEAD changed: %s -> %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "upstream.txt")); !os.IsNotExist(err) {
+		t.Fatalf("local checkout should be untouched: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(results[0].WorktreeDir, "upstream.txt")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -260,14 +291,9 @@ func useFakePNPM(t *testing.T, home string, instance *Manager) string {
 	return logPath
 }
 
-func TestUpgradeLocalBuildRebasesAndBuilds(t *testing.T) {
-	home, upstream, clone := syncFixture(t)
-	writeFile(t, filepath.Join(clone, "local.txt"), "local\n")
-	run(t, clone, "add", ".")
-	run(t, clone, "commit", "-m", "local")
-	writeFile(t, filepath.Join(upstream, "upstream.txt"), "upstream\n")
-	run(t, upstream, "add", ".")
-	run(t, upstream, "commit", "-m", "upstream")
+func TestUpgradeBuildsPureLocalInPlace(t *testing.T) {
+	home, clone := pureLocalFixture(t)
+	writeFile(t, filepath.Join(clone, "a.txt"), "dirty\n")
 	instance := newTestManager(t, home, clone)
 	logPath := useFakePNPM(t, home, instance)
 	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
@@ -284,10 +310,7 @@ func TestUpgradeLocalBuildRebasesAndBuilds(t *testing.T) {
 	if results[0].BuildSource != BuildSourceLocal {
 		t.Fatalf("build source = %q", results[0].BuildSource)
 	}
-	if _, err := os.Stat(filepath.Join(clone, "local.txt")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(clone, "upstream.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(clone, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
 	log, err := os.ReadFile(logPath)
@@ -296,68 +319,29 @@ func TestUpgradeLocalBuildRebasesAndBuilds(t *testing.T) {
 	}
 }
 
-func TestUpgradeLocalBuildBlocksDirtyCheckout(t *testing.T) {
-	home, _, clone := syncFixture(t)
-	writeFile(t, filepath.Join(clone, "dirty.txt"), "dirty\n")
-	instance := newTestManager(t, home, clone)
-	logPath := useFakePNPM(t, home, instance)
-	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
-		Names:       []string{"demo"},
-		NoBackup:    true,
-		BuildSource: BuildSourceLocal,
-	})
+func TestUpgradePureLocalDoesNotRequireGit(t *testing.T) {
+	home := t.TempDir()
+	clone := filepath.Join(home, "external", "plain")
+	if err := os.MkdirAll(clone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(clone, "package.json"), `{"name":"plain","scripts":{"build":"true"}}`)
+	writeProfile(t, home, "web", `{"dependencies":{"plain":"link:`+clone+`"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, BackupDir: filepath.Join(home, "backups"), WorktreeRoot: filepath.Join(home, "worktrees"), PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != "rebase-blocked" {
+	logPath := useFakePNPM(t, home, instance)
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{Names: []string{"plain"}, NoBackup: true, BuildSource: BuildSourceLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "upgraded" {
 		t.Fatalf("results = %+v", results)
 	}
-	if !strings.Contains(results[0].Message, "manual handling") {
-		t.Fatalf("message = %q", results[0].Message)
-	}
-	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-		t.Fatalf("build should not run: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(clone, "dirty.txt")); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestUpgradeLocalBuildRebaseConflictSkipsUpgrade(t *testing.T) {
-	home, upstream, clone := syncFixture(t)
-	writeFile(t, filepath.Join(clone, "a.txt"), "local\n")
-	run(t, clone, "commit", "-am", "local")
-	writeFile(t, filepath.Join(upstream, "a.txt"), "upstream\n")
-	run(t, upstream, "commit", "-am", "upstream")
-	before, err := gitutil.Head(clone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	instance := newTestManager(t, home, clone)
-	logPath := useFakePNPM(t, home, instance)
-	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
-		Names:       []string{"demo"},
-		NoBackup:    true,
-		BuildSource: BuildSourceLocal,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 1 || results[0].Status != "rebase-failed" {
-		t.Fatalf("results = %+v", results)
-	}
-	if !strings.Contains(results[0].Message, "manual handling") {
-		t.Fatalf("message = %q", results[0].Message)
-	}
-	after, err := gitutil.Head(clone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before != after {
-		t.Fatalf("HEAD changed after failed rebase: %s -> %s", before, after)
-	}
-	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-		t.Fatalf("build should not run: %v", err)
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("build was not invoked: %v", err)
 	}
 }
 

@@ -94,11 +94,14 @@ func TestUpdateDryRunLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != "would-update" {
+	if len(results) != 1 || results[0].Status != "skipped" {
 		t.Fatalf("results = %+v", results)
 	}
-	if results[0].Kind != model.SourceLocal {
+	if results[0].Kind != model.SourceLocalRemote {
 		t.Fatalf("kind = %q", results[0].Kind)
+	}
+	if !strings.Contains(results[0].Message, "local-remote uses dshpm sync + upgrade") {
+		t.Fatalf("message = %q", results[0].Message)
 	}
 }
 
@@ -216,7 +219,7 @@ func run(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func TestUpdateLocalConflictRestoresChanges(t *testing.T) {
+func TestUpdateSkipsLocalRemoteWithLocalChanges(t *testing.T) {
 	home := t.TempDir()
 	upstream := filepath.Join(home, "upstream")
 	clone := filepath.Join(home, "external", "demo")
@@ -254,7 +257,7 @@ func TestUpdateLocalConflictRestoresChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != "conflict" {
+	if len(results) != 1 || results[0].Status != "skipped" {
 		t.Fatalf("results = %+v", results)
 	}
 	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
@@ -266,7 +269,7 @@ func TestUpdateLocalConflictRestoresChanges(t *testing.T) {
 	}
 }
 
-func TestUpdateLocalReappliesPatch(t *testing.T) {
+func TestUpdateSkipsLocalRemoteWithPatch(t *testing.T) {
 	home := t.TempDir()
 	upstream := filepath.Join(home, "upstream")
 	clone := filepath.Join(home, "external", "demo")
@@ -305,7 +308,7 @@ func TestUpdateLocalReappliesPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Status != "updated" {
+	if len(results) != 1 || results[0].Status != "skipped" {
 		t.Fatalf("results = %+v", results)
 	}
 	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
@@ -315,8 +318,8 @@ func TestUpdateLocalReappliesPatch(t *testing.T) {
 	if string(content) != "local\n" {
 		t.Fatalf("content = %q", content)
 	}
-	if _, err := os.Stat(filepath.Join(clone, "b.txt")); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(clone, "b.txt")); !os.IsNotExist(err) {
+		t.Fatalf("local checkout should be untouched: %v", err)
 	}
 }
 

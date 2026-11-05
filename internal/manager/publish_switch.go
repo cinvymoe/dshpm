@@ -43,7 +43,7 @@ func (m *Manager) switchDependency(ctx context.Context, name, spec string) error
 	if selected == nil {
 		return fmt.Errorf("unknown plugin: %s", name)
 	}
-	if selected.Kind != model.SourceLocal {
+	if selected.Kind != model.SourceLocal && selected.Kind != model.SourceLocalRemote {
 		return fmt.Errorf("%s is %s, not a local plugin", name, selected.Kind)
 	}
 	oldSpec := selected.Spec

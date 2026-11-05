@@ -143,6 +143,9 @@ func (p *Profile) Plugins() []model.Plugin {
 		plugin.InstalledVersion = readInstalledVersion(filepath.Join(p.Dir, "node_modules", filepath.FromSlash(name), "package.json"))
 		if plugin.Kind == model.SourceLocal && plugin.LocalDir != "" {
 			FillLocalGitFacts(&plugin)
+			if plugin.GitURL != "" {
+				plugin.Kind = model.SourceLocalRemote
+			}
 		}
 		plugins = append(plugins, plugin)
 	}

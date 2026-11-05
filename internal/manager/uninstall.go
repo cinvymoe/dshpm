@@ -69,7 +69,7 @@ func (m *Manager) Uninstall(ctx context.Context, options UninstallOptions) ([]Un
 	for _, plugin := range selected {
 		names = append(names, plugin.Name)
 		identifiers[plugin.Name] = struct{}{}
-		if plugin.Kind == model.SourceLocal && plugin.LocalDir != "" {
+		if (plugin.Kind == model.SourceLocal || plugin.Kind == model.SourceLocalRemote) && plugin.LocalDir != "" {
 			if name := localPackageName(plugin.LocalDir); name != "" {
 				identifiers[name] = struct{}{}
 			}

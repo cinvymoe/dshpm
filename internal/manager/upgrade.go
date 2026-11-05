@@ -23,8 +23,8 @@ const (
 	BuildSourceAuto LocalBuildSource = "auto"
 	// BuildSourceWorktree builds only the remote worktree created by sync.
 	BuildSourceWorktree LocalBuildSource = "worktree"
-	// BuildSourceLocal rebases the local checkout onto its upstream before
-	// building it.
+	// BuildSourceLocal builds a pure local checkout in place. local-remote
+	// plugins ignore it and always build their remote worktree.
 	BuildSourceLocal LocalBuildSource = "local"
 )
 
@@ -44,9 +44,8 @@ type UpgradeOptions struct {
 }
 
 // Upgrade installs the newest registry/git versions and rebuilds local
-// checkouts. Local build source defaults to an existing worktree, then the
-// local checkout. A local build rebases first; a rebase failure skips the
-// upgrade and leaves the checkout untouched for manual handling.
+// checkouts. Pure local checkouts are built in place. local-remote checkouts
+// are never built in place: sync must first create their remote worktree.
 func (m *Manager) Upgrade(ctx context.Context, options UpgradeOptions) ([]UpdateResult, error) {
 	if options.Out == nil {
 		options.Out = m.Out
@@ -67,7 +66,7 @@ func (m *Manager) Upgrade(ctx context.Context, options UpgradeOptions) ([]Update
 	selected, unmanaged := m.partitionManaged(selected)
 	plans := make([]UpdateResult, 0, len(selected))
 	for _, plugin := range selected {
-		if plugin.Kind == model.SourceLocal {
+		if plugin.Kind == model.SourceLocal || plugin.Kind == model.SourceLocalRemote {
 			plans = append(plans, m.planLocalUpgrade(plugin, options))
 			continue
 		}
@@ -112,7 +111,7 @@ func (m *Manager) Upgrade(ctx context.Context, options UpgradeOptions) ([]Update
 			continue
 		}
 		plugin := selected[index]
-		if plugin.Kind == model.SourceLocal {
+		if plugin.Kind == model.SourceLocal || plugin.Kind == model.SourceLocalRemote {
 			results = append(results, m.applyLocalUpgrade(ctx, plugin, result, options, backupPath))
 			continue
 		}
@@ -144,9 +143,9 @@ func normalizeBuildSource(value LocalBuildSource) (LocalBuildSource, error) {
 
 func (m *Manager) planLocalUpgrade(plugin model.Plugin, options UpgradeOptions) UpdateResult {
 	result := UpdateResult{Name: plugin.Name, Kind: plugin.Kind, From: localLabel(plugin)}
-	if plugin.LocalDir == "" || !gitutil.IsRepository(plugin.LocalDir) {
+	if plugin.LocalDir == "" {
 		result.Status = "skipped"
-		result.Message = "local checkout is not a git repository"
+		result.Message = "local directory is missing"
 		return result
 	}
 	worktreeDir := m.worktreeDirFor(plugin.Name, options.WorktreeRoot)
@@ -154,51 +153,29 @@ func (m *Manager) planLocalUpgrade(plugin model.Plugin, options UpgradeOptions) 
 	if info, err := os.Stat(worktreeDir); err == nil && info.IsDir() && gitutil.WorktreeRegistered(plugin.LocalDir, worktreeDir) {
 		worktreeReady = true
 	}
-	source := options.BuildSource
-	if source == "" {
-		source = BuildSourceAuto
-	}
-	if source == BuildSourceAuto {
-		if worktreeReady {
-			source = BuildSourceWorktree
-		} else {
-			source = BuildSourceLocal
-		}
-	}
-	result.BuildSource = source
-	if source == BuildSourceWorktree {
+	if plugin.Kind == model.SourceLocalRemote {
+		// local-remote checkouts are deliberately never built in place. A
+		// remote worktree created by sync is the only build source; the local
+		// checkout and any local commits or uncommitted changes stay untouched.
+		result.BuildSource = BuildSourceWorktree
 		if !worktreeReady {
 			result.Status = "worktree-missing"
-			result.Message = fmt.Sprintf("no remote worktree; run dshpm sync %s first, or use --build-source local", plugin.Name)
+			result.Message = fmt.Sprintf("local-remote has no remote worktree; run dshpm sync %s first", plugin.Name)
 			return result
 		}
 		result.WorktreeDir = worktreeDir
 		result.WorktreeRef = gitutil.ShortHead(worktreeDir)
 		result.To = "worktree@" + result.WorktreeRef
 		result.Status = "planned"
-		result.Message = "build remote worktree"
+		result.Message = "build remote worktree (local-remote; local checkout untouched)"
 		return result
 	}
+	// A pure local checkout has no remote to synchronize with. Build it in
+	// place; do not require Git or rebase it, and do not create a worktree.
+	result.BuildSource = BuildSourceLocal
 	result.To = plugin.LocalCommit
-	hasRemote := gitutil.RemoteURL(plugin.LocalDir, "origin") != ""
-	if hasRemote && plugin.Dirty > 0 {
-		result.Status = "rebase-blocked"
-		result.Message = fmt.Sprintf("%d local change(s) prevent rebase; commit or stash them and run dshpm sync; upgrade skipped, manual handling required", plugin.Dirty)
-		return result
-	}
 	result.Status = "planned"
-	if !hasRemote {
-		result.Message = "build local checkout (no remote)"
-		return result
-	}
-	switch {
-	case plugin.Ahead > 0 && plugin.Behind > 0:
-		result.Message = fmt.Sprintf("rebase %d local commit(s) onto remote, then build local checkout", plugin.Ahead)
-	case plugin.Behind > 0:
-		result.Message = fmt.Sprintf("fast-forward %d commit(s), then build local checkout", plugin.Behind)
-	default:
-		result.Message = "build local checkout"
-	}
+	result.Message = "build local checkout (pure local)"
 	return result
 }
 
@@ -248,9 +225,9 @@ func (m *Manager) applyLocalUpgrade(ctx context.Context, plugin model.Plugin, pl
 	return result
 }
 
-// prepareLocalBuild rebases or fast-forwards a local checkout onto its
-// upstream before a local build. It never discards local changes: a dirty
-// checkout or a rebase conflict stops the upgrade for manual handling.
+// prepareLocalBuild validates a pure local checkout before building it. Pure
+// local checkouts have no remote to synchronize with; local uncommitted changes
+// do not prevent the build.
 func (m *Manager) prepareLocalBuild(ctx context.Context, plugin model.Plugin, result *UpdateResult) error {
 	dir := plugin.LocalDir
 	if state := gitutil.RepoState(dir); state != "" {
@@ -258,65 +235,5 @@ func (m *Manager) prepareLocalBuild(ctx context.Context, plugin model.Plugin, re
 		result.Message = fmt.Sprintf("local repository has an unfinished %s; finish or abort it before upgrading", state)
 		return fmt.Errorf("unfinished %s", state)
 	}
-	if gitutil.RemoteURL(dir, "origin") == "" {
-		return nil
-	}
-	if dirty := gitutil.DirtyCount(dir); dirty > 0 {
-		result.Status = "rebase-blocked"
-		result.Message = fmt.Sprintf("%d local change(s) prevent rebase; commit or stash them and run dshpm sync; upgrade skipped, manual handling required", dirty)
-		return fmt.Errorf("local changes prevent rebase")
-	}
-	if err := gitutil.Fetch(dir); err != nil {
-		result.Status = "failed"
-		result.Message = "fetch: " + err.Error()
-		return err
-	}
-	target, err := gitutil.ResolveUpdateTarget(dir)
-	if err != nil {
-		result.Status = "failed"
-		result.Message = err.Error()
-		return err
-	}
-	targetCommit, err := gitutil.RevParse(dir, target)
-	if err != nil {
-		result.Status = "failed"
-		result.Message = err.Error()
-		return err
-	}
-	head, err := gitutil.Head(dir)
-	if err != nil {
-		result.Status = "failed"
-		result.Message = err.Error()
-		return err
-	}
-	if head == targetCommit {
-		if plugin.LocalCommit != "" {
-			result.To = plugin.LocalCommit
-		}
-		return nil
-	}
-	ahead, behind, err := gitutil.AheadBehind(dir, targetCommit)
-	if err != nil {
-		result.Status = "failed"
-		result.Message = err.Error()
-		return err
-	}
-	if ahead > 0 && behind > 0 {
-		if err := gitutil.Rebase(dir, target); err != nil {
-			gitutil.RebaseAbort(dir)
-			result.Status = "rebase-failed"
-			result.Message = "rebase conflict; upgrade skipped; local checkout left untouched; manual handling required: " + firstLine(err.Error())
-			return err
-		}
-		result.Message = fmt.Sprintf("rebased %d local commit(s)", ahead)
-	} else if behind > 0 {
-		if err := gitutil.MergeFFOnly(dir, target); err != nil {
-			result.Status = "failed"
-			result.Message = "fast-forward: " + err.Error()
-			return err
-		}
-		result.Message = fmt.Sprintf("fast-forwarded %d commit(s)", behind)
-	}
-	result.To = target + "@" + gitutil.Shorten(targetCommit)
 	return nil
 }

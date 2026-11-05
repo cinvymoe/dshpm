@@ -136,13 +136,38 @@ func RemoteURL(dir, remote string) string {
 	return value
 }
 
+// RemoteNames returns the configured remote names in Git's order.
+func RemoteNames(dir string) []string {
+	value, err := Output(dir, "remote")
+	if err != nil || value == "" {
+		return nil
+	}
+	return strings.Fields(value)
+}
+
+// FirstRemoteURL returns the first configured remote URL.
+func FirstRemoteURL(dir string) string {
+	for _, remote := range RemoteNames(dir) {
+		if url := RemoteURL(dir, remote); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
 // ResolveUpdateTarget returns the ref that a local checkout should fast-forward
-// to: its configured upstream, then origin/HEAD, then origin/main or origin/master.
+// to: its configured upstream, then HEAD/main/master of each configured remote.
 func ResolveUpdateTarget(dir string) (string, error) {
 	if upstream := Upstream(dir); upstream != "" {
 		return upstream, nil
 	}
-	for _, candidate := range []string{"origin/HEAD", "origin/main", "origin/master", "main", "master"} {
+	candidates := []string{"main", "master"}
+	for _, remote := range RemoteNames(dir) {
+		for _, branch := range []string{"HEAD", "main", "master"} {
+			candidates = append([]string{remote + "/" + branch}, candidates...)
+		}
+	}
+	for _, candidate := range candidates {
 		if _, err := Output(dir, "rev-parse", "--verify", candidate); err == nil {
 			if candidate == "origin/HEAD" {
 				resolved, err := Output(dir, "rev-parse", "--symbolic-full-name", candidate)

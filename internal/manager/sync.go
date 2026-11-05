@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -45,10 +46,9 @@ type syncPlan struct {
 	changed bool
 }
 
-// Sync synchronizes local git checkouts with their remote branch. It never
-// captures or reapplies a patch: a dirty checkout or a rebase conflict is
-// handled by checking the remote revision out into a separate worktree and
-// leaving the local checkout untouched.
+// Sync synchronizes local-remote checkouts by checking the remote revision
+// out into a separate worktree. It never rebases, patches, or otherwise
+// modifies the local checkout; pure local checkouts have nothing to sync.
 func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, error) {
 	if options.Out == nil {
 		options.Out = m.Out
@@ -108,7 +108,7 @@ func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, 
 
 func (m *Manager) planSync(plugin model.Plugin, worktreeRoot string) syncPlan {
 	plan := syncPlan{result: SyncResult{Name: plugin.Name, Kind: plugin.Kind, Status: "skipped"}}
-	if plugin.Kind != model.SourceLocal {
+	if plugin.Kind != model.SourceLocal && plugin.Kind != model.SourceLocalRemote {
 		plan.result.Message = "only local checkouts need repository sync"
 		return plan
 	}
@@ -151,6 +151,24 @@ func (m *Manager) planSync(plugin model.Plugin, worktreeRoot string) syncPlan {
 		return plan
 	}
 	plan.result.To = target + "@" + gitutil.Shorten(targetCommit)
+	if plugin.Kind == model.SourceLocalRemote {
+		// local-remote checkouts are never rebased or fast-forwarded. Always
+		// expose the remote revision through a separate worktree and leave the
+		// local checkout untouched.
+		worktreeDir := m.worktreeDirFor(plugin.Name, worktreeRoot)
+		plan.result.WorktreeDir = worktreeDir
+		if info, err := os.Stat(worktreeDir); err == nil && info.IsDir() && gitutil.WorktreeRegistered(plugin.LocalDir, worktreeDir) && gitutil.ShortHead(worktreeDir) == gitutil.Shorten(targetCommit) {
+			plan.result.Status = "up-to-date"
+			plan.result.WorktreeRef = gitutil.ShortHead(worktreeDir)
+			plan.result.Message = "remote worktree already at target"
+			return plan
+		}
+		plan.action = "worktree"
+		plan.result.Status = "planned"
+		plan.result.Action = "worktree"
+		plan.result.Message = "local-remote uses remote worktree; local checkout left untouched"
+		return plan
+	}
 	ahead, behind, err := gitutil.AheadBehind(plugin.LocalDir, targetCommit)
 	if err != nil {
 		plan.result.Status = "failed"
