@@ -89,3 +89,33 @@ func TestRunPublishDryRun(t *testing.T) {
 		t.Fatalf("dry run created .git: %v", err)
 	}
 }
+
+func TestRunManageWritesConfig(t *testing.T) {
+	home := t.TempDir()
+	profileDir := filepath.Join(home, "profiles", "web")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "package.json"), []byte(`{"dependencies":{"demo":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, "config.json")
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"unmanage", "demo", "--dsh-home", home, "--profile", "web", "--config", configPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"demo"`) {
+		t.Fatalf("config = %s", data)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"manage", "demo", "--dsh-home", home, "--profile", "web", "--config", configPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
