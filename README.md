@@ -234,7 +234,7 @@ dshpm unmanage @dsh-external/dsh-plugin-manager
 # 恢复管理
 dshpm manage @dsh-external/dsh-plugin-manager
 
-# 查看 MANAGED 列：yes 表示会被管理，no 表示跳过自动操作
+# 查看 MANAGED 列：yes 表示会被管理，no 表示跳过自动操作（no 排在最后）
 dshpm list
 ```
 

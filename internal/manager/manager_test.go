@@ -371,3 +371,21 @@ func TestUpgradeSkipsUnmanagedPlugin(t *testing.T) {
 		t.Fatalf("results = %+v", results)
 	}
 }
+
+func TestListSortsUnmanagedLast(t *testing.T) {
+	home := t.TempDir()
+	writeProfile(t, home, "web", `{"dependencies":{"aaa":"1.0.0","zzz":"1.0.0"}}`)
+	cfg := config.Resolved{Config: config.Config{DSHHome: home, Unmanaged: []string{"aaa"}, PNPM: "pnpm", Git: "git"}}
+	instance, err := New(cfg, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Offline = true
+	plugins, err := instance.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 2 || plugins[0].Name != "zzz" || plugins[1].Name != "aaa" {
+		t.Fatalf("order = %+v", plugins)
+	}
+}

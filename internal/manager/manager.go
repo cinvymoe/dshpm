@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -171,6 +172,12 @@ func (m *Manager) List(ctx context.Context) ([]model.Plugin, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	sort.SliceStable(plugins, func(i, j int) bool {
+		if plugins[i].Managed == plugins[j].Managed {
+			return false
+		}
+		return plugins[i].Managed
+	})
 	return plugins, nil
 }
 
