@@ -46,9 +46,10 @@ type syncPlan struct {
 	changed bool
 }
 
-// Sync synchronizes local-remote checkouts by checking the remote revision
-// out into a separate worktree. It never rebases, patches, or otherwise
-// modifies the local checkout; pure local checkouts have nothing to sync.
+// Sync synchronizes local checkouts with their remotes. Pure local checkouts
+// rebase in place only when the working tree is clean; dirty checkouts are
+// rejected without touching the worktree. local-remote checkouts always use a
+// separate worktree and are never touched.
 func (m *Manager) Sync(ctx context.Context, options SyncOptions) ([]SyncResult, error) {
 	if options.Out == nil {
 		options.Out = m.Out
@@ -169,6 +170,13 @@ func (m *Manager) planSync(plugin model.Plugin, worktreeRoot string) syncPlan {
 		plan.result.Message = "local-remote uses remote worktree; local checkout left untouched"
 		return plan
 	}
+	if plugin.Kind == model.SourceLocal {
+		if dirty := gitutil.DirtyCount(plugin.LocalDir); dirty > 0 {
+			plan.result.Status = "blocked"
+			plan.result.Message = fmt.Sprintf("%d local change(s); local checkout must be clean to sync", dirty)
+			return plan
+		}
+	}
 	ahead, behind, err := gitutil.AheadBehind(plugin.LocalDir, targetCommit)
 	if err != nil {
 		plan.result.Status = "failed"
@@ -177,21 +185,11 @@ func (m *Manager) planSync(plugin model.Plugin, worktreeRoot string) syncPlan {
 	}
 	if head == targetCommit {
 		plan.result.Status = "up-to-date"
-		if plugin.Dirty > 0 {
-			plan.result.Message = fmt.Sprintf("%d local change(s); remote is unchanged", plugin.Dirty)
-		}
 		return plan
 	}
 	if ahead > 0 && behind == 0 {
 		plan.result.Status = "ahead"
 		plan.result.Message = fmt.Sprintf("%d local commit(s) are not on the remote; nothing to sync", ahead)
-		return plan
-	}
-	if plugin.Dirty > 0 {
-		plan.action = "worktree"
-		plan.result.Status = "planned"
-		plan.result.Action = "worktree"
-		plan.result.Message = fmt.Sprintf("%d local change(s) prevent rebase; remote will be checked out in a worktree", plugin.Dirty)
 		return plan
 	}
 	if ahead > 0 && behind > 0 {
@@ -246,21 +244,32 @@ func (m *Manager) applySync(ctx context.Context, plugin model.Plugin, plan syncP
 			result.Message = err.Error()
 			return result
 		}
-		if err := gitutil.Rebase(plugin.LocalDir, target); err != nil {
-			gitutil.RebaseAbort(plugin.LocalDir)
-			action = "worktree"
-			result.Action = "worktree"
-			result.Message = "rebase conflict; local checkout left untouched, remote checked out in worktree: " + firstLine(err.Error())
-		} else {
-			if err := m.refreshWorktree(plugin, options, target); err != nil {
-				result.Status = "failed"
-				result.Message = "refresh worktree: " + err.Error()
-				return result
-			}
-			result.Status = "synced"
-			result.Message = "local commits rebased onto remote"
+		originalHead, err := gitutil.Head(plugin.LocalDir)
+		if err != nil {
+			result.Status = "failed"
+			result.Message = "read head: " + err.Error()
 			return result
 		}
+		if err := gitutil.Rebase(plugin.LocalDir, target); err != nil {
+			gitutil.RebaseAbort(plugin.LocalDir)
+			if restoreErr := restoreSyncOriginal(plugin.LocalDir, originalHead); restoreErr != nil {
+				result.Status = "failed"
+				result.Message = "rebase conflict; restore failed: " + restoreErr.Error() + "; " + firstLine(err.Error())
+				return result
+			}
+			result.Status = "conflict"
+			result.Action = "rebase"
+			result.Message = "rebase conflict; restored original working tree"
+			return result
+		}
+		if err := m.refreshWorktree(plugin, options, target); err != nil {
+			result.Status = "failed"
+			result.Message = "refresh worktree: " + err.Error()
+			return result
+		}
+		result.Status = "synced"
+		result.Message = "local commits rebased onto remote"
+		return result
 	}
 	if action == "worktree" {
 		target, err := gitutil.ResolveUpdateTarget(plugin.LocalDir)
@@ -287,6 +296,15 @@ func (m *Manager) applySync(ctx context.Context, plugin model.Plugin, plan syncP
 	result.Status = "failed"
 	result.Message = "unsupported sync action " + action
 	return result
+}
+
+// restoreSyncOriginal returns the checkout to its pre-sync HEAD and clean
+// working tree after a rebase conflict.
+func restoreSyncOriginal(dir, originalHead string) error {
+	if err := gitutil.ResetHard(dir, originalHead); err != nil {
+		return err
+	}
+	return gitutil.CleanUntracked(dir)
 }
 
 func firstLine(value string) string {

@@ -4,7 +4,7 @@
 
 - **区分本地版本和远程版本**：同时显示本地已安装版本 / 本地 checkout 的 commit，以及 npm registry 或 git 上游的最新版本。
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
-- **同步与升级**：本地插件分为 `local`（纯本地目录，无远程 Git，升级直接构建本地目录）和 `local-remote`（带远程 Git 的本地 checkout，不管理本地修改；`sync` 始终把远程版本检出到独立 worktree，`upgrade` 构建该 worktree 并切换 profile）。`update` 保留旧的 patch 流程。
+- **同步与升级**：本地插件分为 `local`（默认无远程 Git；`sync` 发现未提交修改就拒绝并报告状态，不 stash/rebase；`upgrade` 也要求 checkout 干净）和 `local-remote`（带远程 Git 的本地 checkout，不管理本地修改；`sync` 始终把远程版本检出到独立 worktree，`upgrade` 构建该 worktree 并切换 profile）。`update` 保留旧的 patch 流程。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
 - **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release；发布成功后默认把 profile 依赖切到 `github:OWNER/REPO` 远程管理。
 - **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
@@ -18,7 +18,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.7" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.8" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -52,7 +52,7 @@ dshpm update dsh-context --dry-run
 # 更新指定的 npm / git 插件
 dshpm update dsh-context @indexyz/dsh-autocompact
 
-# 同步本地 git 插件；冲突时自动创建远程 worktree
+# 同步本地 git 插件；local 有脏文件会拒绝，local-remote 用 worktree
 dshpm sync --all --dry-run
 dshpm sync --all
 
@@ -89,7 +89,7 @@ dshpm doctor
 | 本地 `local-remote` (`link:` / `file:`，带远程 Git) | 本地 checkout 的 `package.json` 版本 + git `HEAD` | 首个配置 remote 的 `HEAD` |
 | tarball (`.tgz`) | 已安装版本 | `-`（没有可查询的更新源） |
 
-`KIND` 列区分 `local`、`local-remote`、`git`、`registry`、`tarball`。`CHANGES` 列显示本地 checkout 的未提交文件数、ahead/behind 提交数；使用远程 worktree 时显示 `worktree:<ref>`。`STATUS` 列会给出 `up-to-date`、`update`、`local-only`、`local-remote`、`dirty`、`ahead`、`diverged`、`worktree`、`pinned` 等状态。
+`KIND` 列区分 `local`、`local-remote`、`git`、`registry`、`tarball`。`CHANGES` 列显示本地 checkout 的未提交文件数、ahead/behind 提交数；使用远程 worktree 时显示 `worktree:<ref>`。`STATUS` 列会给出 `up-to-date`、`update`、`local-only`、`local-remote`、`dirty`、`ahead`、`diverged`、`worktree`、`conflict`、`pinned` 等状态。
 
 ## 备份格式
 
@@ -206,30 +206,30 @@ dshpm publish --all-local --visibility private
 
 本地插件按是否有远程 Git 分为两类：
 
-- `local`：纯本地目录（`link:` / `file:`，没有 `origin` remote）。升级直接在本地目录构建，不进行 rebase，也不创建 worktree；本地未提交修改不阻止构建。
+- `local`：默认是纯本地目录（`link:` / `file:`，没有 `origin` remote）。升级直接在本地目录构建，不进行 rebase，也不创建 worktree；如果本地目录是 git checkout，任何未提交修改都会阻止 `sync` 和 `upgrade` 并报告状态。通过 `dshpm mode local` 强制覆盖带 remote 的插件时同样适用，`sync` 不创建 worktree。
 - `local-remote`：带远程 Git（`origin` 或其他 remote）的本地 checkout。dshpm **不管理**本地修改，不 rebase、不 patch、不删除本地提交；`sync` 始终把远程版本检出到独立 worktree（默认 `/data/project/dshpm-worktrees/<profile>/<plugin>`），`upgrade` 只构建该 worktree，成功后把 profile 依赖切到 `link:<worktree>` 并执行 `pnpm install`。本地 checkout 完全不动。
 
 推荐顺序：先 `dshpm sync`，再 `dshpm upgrade`。
 
-`sync` 只处理 `local-remote` 插件：
+`sync` 处理本地 checkout：
 
-- `fetch --all --prune` 后解析 upstream（优先配置的 upstream，其次各 remote 的 `HEAD`/`main`/`master`）；
-- 已注册的 worktree 已指向目标 commit 时显示 `up-to-date`；否则检出目标到 worktree；
-- 本地 checkout 不参与 fast-forward/rebase，也不会被修改；`local` 插件直接跳过。
+- `local`：`fetch --all --prune` 后解析 upstream；如果 `git status --porcelain` 有任意输出，直接返回 `blocked` 并报告脏文件数量，不做 stash、不 rebase、不改变工作区；干净时才执行 fast-forward 或 rebase，rebase 冲突会 abort 并恢复到执行前 HEAD，不留下冲突现场。
+- `local-remote`：`fetch --all --prune` 后解析 upstream；已注册的 worktree 已指向目标 commit 时显示 `up-to-date`，否则检出目标到 worktree；本地 checkout 不参与 fast-forward/rebase，也不会被修改。
+- 没有 remote 的 `local` 显示 `local-only`，直接跳过。
 
 `upgrade` 复用 `update` 的 npm/git 升级路径。本地插件的构建规则：
 
-- `local`：直接构建本地目录；`--build-source local` 是唯一有效的方式（`auto` 也走本地），不要求 git 仓库。
+- `local`：直接构建本地目录；git checkout 有未提交修改时返回 `blocked` 并报告状态，`--build-source local` 是唯一有效的方式（`auto` 也走本地），非 git 本地目录不要求 git 仓库。
 - `local-remote`：始终使用 `sync` 生成的 worktree；没有 worktree 时返回 `worktree-missing` 并提示先执行 `dshpm sync <name>`，不会偷偷构建本地目录；`--build-source local` 对 `local-remote` 不生效。
 - `--build-source worktree` 只对 `local-remote` 有意义；`--build-source auto`（默认）对 `local` 走本地、对 `local-remote` 走 worktree。
 
 `--no-build` 只更新依赖，不运行构建；存在 worktree 时也不会切换 profile。
 
 ```sh
-# 先看同步计划（只处理 local-remote）
+# 先看同步计划（local 有脏文件会 blocked，local-remote 会建 worktree）
 dshpm sync --all --dry-run
 
-# 同步全部 local-remote 插件，生成远程 worktree
+# 同步全部本地 git 插件
 dshpm sync --all
 
 # 升级全部插件；local 直接构建，local-remote 需要先 sync
@@ -271,14 +271,14 @@ dshpm mode local dsh-superagent
 dshpm mode auto dsh-superagent
 ```
 
-`local` 覆盖保存在 `~/.config/dshpm/config.json` 的 `modes` 对象中，例如 `{"dsh-superagent":"local"}`；`auto` 会删除覆盖并恢复自动分类。切换到 `local` 后，`upgrade` 直接在本地目录构建，`sync` 按本地 git checkout 做 rebase/fast-forward，不再创建 worktree。
+`local` 覆盖保存在 `~/.config/dshpm/config.json` 的 `modes` 对象中，例如 `{"dsh-superagent":"local"}`；`auto` 会删除覆盖并恢复自动分类。切换到 `local` 后，`upgrade` 直接在本地目录构建；`sync` 对带 remote 的 checkout 不创建 worktree，有未提交修改时直接 `blocked`，干净时才 rebase。
 
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
 2. npm / git 依赖使用 `pnpm add`，只更新当前 profile 的依赖与 lockfile。
 3. 本地插件：
-   - `local` 直接在本地目录构建，不执行 rebase，本地未提交修改不阻止构建；
+   - `local` 的 `upgrade` 直接在本地目录构建，不执行 rebase；`sync` 对带 remote 的 local 先检查工作区，有脏文件直接 `blocked`，不 stash、不 rebase，干净时才同步；
    - `local-remote` 由 `sync` 把远程版本检出到独立 worktree，`upgrade` 只构建 worktree 并把 profile 依赖切到 `link:<worktree>`，本地 checkout 完全不动；
    - 旧的 `update` 仍对 pure local git checkout 使用 patch 流程：未提交改动用临时 index 采集为 patch，不碰暂存区；只允许 fast-forward（没有本地提交）时更新；更新前创建 `refs/dshpm/backup/<时间>` 备份 ref；快进后重新贴回 patch；冲突时停在上游并报告冲突文件，不改写远端。
 4. 本地提交（ahead）不会被自动丢弃；需要手动处理后再更新。
@@ -320,7 +320,7 @@ dshpm mode auto dsh-superagent
 | `dshpm history` | 列出历史备份 |
 | `dshpm rollback [id]` | 还原历史备份（默认只做计划） |
 | `dshpm publish <name...>` / `--all-local` | 通过 gh 发布本地插件；`--dry-run` 只做计划 |
-| `dshpm sync <name...>` / `--all` | 同步 `local-remote` 插件到远程 worktree；本地 checkout 不修改 |
+| `dshpm sync <name...>` / `--all` | 同步本地 checkout：local 有脏文件时 blocked，干净时 rebase；local-remote 到远程 worktree |
 | `dshpm upgrade <name...>` / `--all` | 升级插件；`local` 直接构建，`local-remote` 构建 worktree |
 | `dshpm update <name...>` / `--all` | 旧的 patch 式更新；`--dry-run` 只做计划 |
 | `dshpm profiles` | 列出 profile 与依赖数量 |

@@ -203,6 +203,91 @@ func TestSyncDirtyCheckoutUsesWorktree(t *testing.T) {
 	}
 }
 
+func TestSyncLocalDirtyIsBlocked(t *testing.T) {
+	home, upstream, clone := syncFixture(t)
+	writeFile(t, filepath.Join(clone, "a.txt"), "dirty\n")
+	writeFile(t, filepath.Join(upstream, "b.txt"), "upstream\n")
+	run(t, upstream, "add", ".")
+	run(t, upstream, "commit", "-m", "upstream")
+	before, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := newTestManager(t, home, clone)
+	instance.Profile.Modes = map[string]string{"demo": "local"}
+	results, err := instance.Sync(context.Background(), SyncOptions{Names: []string{"demo"}, NoBackup: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "blocked" {
+		t.Fatalf("results = %+v", results)
+	}
+	if results[0].Action != "" {
+		t.Fatalf("action = %q; dirty local checkout must not sync", results[0].Action)
+	}
+	if !strings.Contains(results[0].Message, "clean") {
+		t.Fatalf("message = %q", results[0].Message)
+	}
+	after, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("HEAD changed: %s -> %s", before, after)
+	}
+	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "dirty\n" {
+		t.Fatalf("local change = %q", content)
+	}
+	if _, err := os.Stat(filepath.Join(clone, "b.txt")); !os.IsNotExist(err) {
+		t.Fatalf("upstream file unexpectedly present: %v", err)
+	}
+	if stashes, _ := gitutil.Output(clone, "stash", "list"); stashes != "" {
+		t.Fatalf("unexpected stash: %q", stashes)
+	}
+}
+
+func TestSyncLocalRebaseConflictRestoresOriginal(t *testing.T) {
+	home, upstream, clone := syncFixture(t)
+	writeFile(t, filepath.Join(clone, "a.txt"), "local\n")
+	run(t, clone, "commit", "-am", "local")
+	writeFile(t, filepath.Join(upstream, "a.txt"), "upstream\n")
+	run(t, upstream, "commit", "-am", "upstream")
+	before, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := newTestManager(t, home, clone)
+	instance.Profile.Modes = map[string]string{"demo": "local"}
+	results, err := instance.Sync(context.Background(), SyncOptions{Names: []string{"demo"}, NoBackup: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "conflict" {
+		t.Fatalf("results = %+v", results)
+	}
+	after, err := gitutil.Head(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("HEAD changed: %s -> %s", before, after)
+	}
+	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "local\n" {
+		t.Fatalf("local content = %q", content)
+	}
+	if state := gitutil.RepoState(clone); state != "" {
+		t.Fatalf("unfinished git state: %s", state)
+	}
+}
+
 func TestSyncLocalOnly(t *testing.T) {
 	home, _, clone := syncFixture(t)
 	run(t, clone, "remote", "remove", "origin")
@@ -293,7 +378,6 @@ func useFakePNPM(t *testing.T, home string, instance *Manager) string {
 
 func TestUpgradeBuildsPureLocalInPlace(t *testing.T) {
 	home, clone := pureLocalFixture(t)
-	writeFile(t, filepath.Join(clone, "a.txt"), "dirty\n")
 	instance := newTestManager(t, home, clone)
 	logPath := useFakePNPM(t, home, instance)
 	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
@@ -310,12 +394,40 @@ func TestUpgradeBuildsPureLocalInPlace(t *testing.T) {
 	if results[0].BuildSource != BuildSourceLocal {
 		t.Fatalf("build source = %q", results[0].BuildSource)
 	}
-	if _, err := os.Stat(filepath.Join(clone, "a.txt")); err != nil {
-		t.Fatal(err)
-	}
 	log, err := os.ReadFile(logPath)
 	if err != nil || !strings.Contains(string(log), "build") {
 		t.Fatalf("build was not invoked: %q (%v)", log, err)
+	}
+}
+
+func TestUpgradePureLocalDirtyIsBlocked(t *testing.T) {
+	home, clone := pureLocalFixture(t)
+	writeFile(t, filepath.Join(clone, "a.txt"), "dirty\n")
+	instance := newTestManager(t, home, clone)
+	logPath := useFakePNPM(t, home, instance)
+	results, err := instance.Upgrade(context.Background(), UpgradeOptions{
+		Names:       []string{"demo"},
+		NoBackup:    true,
+		BuildSource: BuildSourceLocal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Status != "blocked" {
+		t.Fatalf("results = %+v", results)
+	}
+	if !strings.Contains(results[0].Message, "clean") {
+		t.Fatalf("message = %q", results[0].Message)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("build should not run for dirty checkout: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(clone, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "dirty\n" {
+		t.Fatalf("local change = %q", content)
 	}
 }
 

@@ -148,6 +148,11 @@ func (m *Manager) planLocalUpgrade(plugin model.Plugin, options UpgradeOptions) 
 		result.Message = "local directory is missing"
 		return result
 	}
+	if plugin.Kind == model.SourceLocal && plugin.Dirty > 0 {
+		result.Status = "blocked"
+		result.Message = fmt.Sprintf("%d local change(s); clean the local checkout before upgrading", plugin.Dirty)
+		return result
+	}
 	worktreeDir := m.worktreeDirFor(plugin.Name, options.WorktreeRoot)
 	worktreeReady := false
 	if info, err := os.Stat(worktreeDir); err == nil && info.IsDir() && gitutil.WorktreeRegistered(plugin.LocalDir, worktreeDir) {
@@ -225,15 +230,20 @@ func (m *Manager) applyLocalUpgrade(ctx context.Context, plugin model.Plugin, pl
 	return result
 }
 
-// prepareLocalBuild validates a pure local checkout before building it. Pure
-// local checkouts have no remote to synchronize with; local uncommitted changes
-// do not prevent the build.
+// prepareLocalBuild validates a pure local checkout before building it. A
+// non-Git local directory builds as-is; a Git checkout must be clean so an
+// upgrade never leaves a conflict or mixed working tree behind.
 func (m *Manager) prepareLocalBuild(ctx context.Context, plugin model.Plugin, result *UpdateResult) error {
 	dir := plugin.LocalDir
 	if state := gitutil.RepoState(dir); state != "" {
 		result.Status = "blocked"
 		result.Message = fmt.Sprintf("local repository has an unfinished %s; finish or abort it before upgrading", state)
 		return fmt.Errorf("unfinished %s", state)
+	}
+	if dirty := gitutil.DirtyCount(dir); dirty > 0 {
+		result.Status = "blocked"
+		result.Message = fmt.Sprintf("%d local change(s); clean the local checkout before upgrading", dirty)
+		return fmt.Errorf("dirty local checkout")
 	}
 	return nil
 }

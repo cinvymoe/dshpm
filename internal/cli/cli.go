@@ -511,7 +511,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			result.Name, result.Kind, result.From, result.To, result.Action,
 			syncResultLabel(result), result.WorktreeDir)
-		if result.Status == "failed" || result.Status == "error" || result.Status == "blocked" {
+		if result.Status == "failed" || result.Status == "error" || result.Status == "blocked" || result.Status == "conflict" {
 			failures++
 		}
 	}
