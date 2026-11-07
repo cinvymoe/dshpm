@@ -29,6 +29,9 @@ type Config struct {
 	Pi               string              `json:"pi,omitempty"`
 	SSH              string              `json:"ssh,omitempty"`
 	RemoteRoot       string              `json:"remoteRoot,omitempty"`
+	RemoteRepo       string              `json:"remoteRepo,omitempty"`
+	RemoteBranch     string              `json:"remoteBranch,omitempty"`
+	RemoteCacheDir   string              `json:"remoteCacheDir,omitempty"`
 	Peers            map[string]string   `json:"peers,omitempty"`
 }
 
@@ -215,11 +218,18 @@ func LoadFile(configPath string) (Resolved, error) {
 	if cfg.RemoteRoot == "" {
 		cfg.RemoteRoot = filepath.Join(home, ".cache", "dshpm", "peers")
 	}
+	if cfg.RemoteBranch == "" {
+		cfg.RemoteBranch = "main"
+	}
+	if cfg.RemoteCacheDir == "" {
+		cfg.RemoteCacheDir = filepath.Join(home, ".cache", "dshpm", "github")
+	}
 	cfg.DSHHome = expandPath(cfg.DSHHome, home)
 	cfg.PiHome = expandPath(cfg.PiHome, home)
 	cfg.BackupDir = expandPath(cfg.BackupDir, home)
 	cfg.WorktreeRoot = expandPath(cfg.WorktreeRoot, home)
 	cfg.RemoteRoot = expandPath(cfg.RemoteRoot, home)
+	cfg.RemoteCacheDir = expandPath(cfg.RemoteCacheDir, home)
 	return Resolved{Config: cfg, ConfigPath: configPath}, nil
 }
 

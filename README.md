@@ -8,7 +8,7 @@
 - **同步与升级**：本地插件分为 `local`（默认无远程 Git；`sync` 发现未提交修改就拒绝并报告状态，不 stash/rebase；`upgrade` 也要求 checkout 干净）和 `local-remote`（带远程 Git 的本地 checkout，不管理本地修改；`sync` 始终把远程版本检出到独立 worktree，`upgrade` 构建该 worktree 并切换 profile）。`update` 保留旧的 patch 流程。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
 - **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release；发布成功后默认把 profile 依赖切到 `github:OWNER/REPO` 远程管理。
-- **多设备同步**：`dshpm remote` 通过 SSH 把 DSH 与 Pi 的插件配置打包传到另一台设备；`remote pull --apply` 会先保留本地旧文件再导入。
+- **多设备同步**：`dshpm remote` 支持 GitHub 私有仓库与 SSH 两种后端；GitHub 只同步“管理的远程插件”清单，本地/本地远程插件不会写入仓库。
 - **不改 DSH/Pi 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>`、`~/.pi/agent` 和本地插件 checkout，不修改 DSH/Pi 仓库，也不会 commit 或 push 插件仓库。
 
 > 参考 [clidot](https://github.com/cinvymoe/clidot) 的思路：一个可被 clidot 纳管的独立 CLI 工具，而不是一个 DSH 插件。
@@ -20,7 +20,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.6.0" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.7.0" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -315,9 +315,25 @@ dshpm pi uninstall pi-lens
 
 Pi 的 registry 包通过 `pi update <source>` 升级，git 包通过 `pi` 解析并更新；`dshpm pi upgrade` 不会修改 Pi 的 `settings.json` 中已有的包来源。`dshpm pi backup` 的备份格式与 DSH 备份兼容，`dshpm pi restore` 会先展示计划，`--apply` 才写入。
 
-## 多设备 SSH 配置同步
+## 多设备同步
 
-`dshpm remote` 把当前 DSH profile 与 Pi 用户设置中存在的配置文件打包成快照，通过系统 `ssh` 传到另一台设备；不需要远端安装额外服务：
+`dshpm remote` 支持两种后端：GitHub 私有仓库（推荐）与 SSH 设备。两种后端都只同步“管理的远程插件”，本地插件、`local-remote` 插件和 `managed=false` 的插件始终留在本机，不会写入远端。
+
+### GitHub 私有仓库
+
+```sh
+# 设置私有仓库（首次 push 会自动创建）
+dshpm remote set cinvymoe/dshpm-config
+dshpm remote status          # 查看每个插件的 SYNC=remote/local
+dshpm remote push --dry-run
+dshpm remote push
+dshpm remote pull            # 只显示计划
+dshpm remote pull --apply
+```
+
+`remote push` 生成 `dshpm-state.json`：DSH 部分保存远程 `dependencies` 与远程 `bundle`，Pi 部分保存远程 `packages`（保留对象形式的 extension/skill 过滤）。`remote pull --apply` 只合并这些远程条目：本地 `link:`/`local-remote` 依赖、未管理插件和 Pi 本地包都不会被删除；应用前会把旧文件备份到 `~/.config/dshpm/backups/github-<时间>/`。导入后执行 `pnpm install` / `pi update --extensions` 或重启对应 agent。
+
+### SSH 设备
 
 ```sh
 # 添加/查看/移除设备（ssh target 可以是 user@host 或 ~/.ssh/config 中的别名）
@@ -333,7 +349,7 @@ dshpm remote pull nas
 dshpm remote pull nas --apply
 ```
 
-同步的 DSH 文件为 profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`、`cordis.yml`、`compatibility.json`；Pi 文件为 `settings.json`、`settings-extensions.json` 以及 `npm/package.json`、`npm/package-lock.json`、`npm/bun.lock`。`remote pull --apply` 会先把本地旧文件保存到 `~/.config/dshpm/backups/sync-<时间>/`，再原子替换；导入后需自行执行 `pnpm install` / `pi update --extensions` 或重启对应 agent。远端快照默认放在 `~/.cache/dshpm/peers/<name>/`，可通过配置中的 `remoteRoot` 修改。
+SSH 后端把当前 DSH profile 与 Pi 用户设置中存在的配置文件打包成快照，通过系统 `ssh` 传到另一台设备；DSH 文件为 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`、`cordis.yml`、`compatibility.json`，Pi 文件为 `settings.json`、`settings-extensions.json` 以及 `npm/package.json`、`npm/package-lock.json`、`npm/bun.lock`。`remote pull --apply` 会先把本地旧文件保存到 `~/.config/dshpm/backups/sync-<时间>/`，再原子替换。远端快照默认放在 `~/.cache/dshpm/peers/<name>/`，可通过配置中的 `remoteRoot` 修改。
 
 ## 更新安全规则
 
@@ -369,11 +385,14 @@ dshpm remote pull nas --apply
   "pi": "pi",
   "ssh": "ssh",
   "remoteRoot": "~/.cache/dshpm/peers",
+  "remoteRepo": "cinvymoe/dshpm-config",
+  "remoteBranch": "main",
+  "remoteCacheDir": "~/.cache/dshpm/github",
   "peers": {}
 }
 ```
 
-`unmanaged` 是永不自动更新/同步/升级的 DSH 插件名列表；`unmanagedByAgent` 记录其他 agent（如 `{"pi":["pi-lens"]}`）的不管理列表；`modes` 是本地插件的模式覆盖；`piHome` 是 Pi 用户配置目录；`peers` 是 `remote` 命令使用的 `名称 → ssh target` 映射；`remoteRoot` 是远端快照目录；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入。`worktreeRoot` 是 `local-remote` 同步时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--pi-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
+`unmanaged` 是永不自动更新/同步/升级的 DSH 插件名列表；`unmanagedByAgent` 记录其他 agent（如 `{"pi":["pi-lens"]}`）的不管理列表；`modes` 是本地插件的模式覆盖；`piHome` 是 Pi 用户配置目录；`peers` 是 SSH `remote` 命令使用的 `名称 → ssh target` 映射；`remoteRoot` 是 SSH 远端快照目录；`remoteRepo`/`remoteBranch`/`remoteCacheDir` 是 GitHub 私有仓库同步配置；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入。`worktreeRoot` 是 `local-remote` 同步时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--pi-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
 
 ## 命令一览
 
@@ -395,7 +414,7 @@ dshpm remote pull nas --apply
 | `dshpm profiles` | 列出 DSH profile 与依赖数量 |
 | `dshpm agents` | 列出已检测到的 AI Agent |
 | `dshpm pi <command>` | 管理 Pi packages（list/manage/backup/upgrade/uninstall/doctor 等） |
-| `dshpm remote <command>` | 通过 SSH 推送/拉取 DSH 与 Pi 配置快照 |
+| `dshpm remote <command>` | 通过 GitHub 私有仓库或 SSH 推送/拉取插件配置 |
 | `dshpm doctor` | 检查 DSH 目录、git、pnpm |
 | `dshpm init` | 写默认配置文件 |
 | `dshpm version` | 打印版本 |

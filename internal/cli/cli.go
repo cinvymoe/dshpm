@@ -47,7 +47,7 @@ Commands:
   profiles             List DSH profiles and dependency counts
   agents               List supported AI agents
   pi <command>         Manage Pi plugins (see 'dshpm pi help')
-  remote <command>     Sync plugin configuration between devices over SSH
+  remote <command>     Sync plugin configuration through GitHub or SSH
   doctor               Check the runtime environment
   init                 Write a default config file
   version              Print the dshpm version
@@ -861,6 +861,8 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		Pi:             "pi",
 		SSH:            "ssh",
 		RemoteRoot:     filepath.Join(home, ".cache", "dshpm", "peers"),
+		RemoteBranch:   "main",
+		RemoteCacheDir: filepath.Join(home, ".cache", "dshpm", "github"),
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {

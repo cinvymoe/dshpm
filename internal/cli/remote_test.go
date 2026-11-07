@@ -112,3 +112,40 @@ func assertContainsFile(t *testing.T, path, want string) {
 		t.Fatalf("%s = %q, want %q", path, string(data), want)
 	}
 }
+
+func TestRemoteSetAndStatusClassifyRemoteAndLocal(t *testing.T) {
+	root := t.TempDir()
+	dshHome := filepath.Join(root, "dsh")
+	piHome := filepath.Join(root, "pi")
+	profileDir := filepath.Join(dshHome, "profiles", "web")
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(piHome, "npm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "package.json"), []byte(`{"dependencies":{"remote":"1.0.0","local":"link:/tmp/local"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(piHome, "settings.json"), []byte(`{"packages":["npm:alpha","file:/tmp/pi-local"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.json")
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"remote", "set", "owner/repo", "--config", configPath}, &out, &errOut); code != 0 {
+		t.Fatalf("remote set: %d %s", code, errOut.String())
+	}
+	out.Reset()
+	if code := Run([]string{"remote", "status", "--config", configPath, "--dsh-home", dshHome, "--pi-home", piHome}, &out, &errOut); code != 0 {
+		t.Fatalf("remote status: %d %s", code, errOut.String())
+	}
+	got := out.String()
+	for _, want := range []string{"dsh", "remote", "local", "alpha"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("remote status missing %q: %s", want, got)
+		}
+	}
+	if !strings.Contains(got, "pi") || !strings.Contains(got, "alpha") {
+		t.Fatalf("remote status missing Pi: %s", got)
+	}
+}

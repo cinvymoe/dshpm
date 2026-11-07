@@ -11,29 +11,36 @@ import (
 	"text/tabwriter"
 
 	"github.com/cinvymoe/dshpm/internal/devicesync"
+	"github.com/cinvymoe/dshpm/internal/remotesync"
 )
 
-const remoteUsage = `dshpm remote synchronizes plugin configuration between devices over SSH.
+const remoteUsage = `dshpm remote synchronizes plugin configuration between devices.
 
 Usage:
   dshpm remote <command> [options]
 
 Commands:
-  list                          List configured peer devices
-  add <name> <ssh-target>       Add or replace a peer
-  remove <name>                 Remove a peer
-  push <name> [options]         Upload local DSH/Pi configuration to a peer
-  pull <name> [options]         Show or import a peer's configuration
+  list                          List configured GitHub repository and SSH peers
+  set <owner/repo>              Use a private GitHub repository for remote sync
+  unset                         Disable GitHub remote sync
+  status                        Show managed plugins by remote/local classification
+  add <name> <ssh-target>       Add or replace an SSH peer
+  remove <name>                 Remove an SSH peer
+  push [name] [options]         Upload remote plugin state to GitHub or an SSH peer
+  pull [name] [options]         Show or import remote plugin state
+
+GitHub sync stores only managed remote plugins. Local and unmanaged plugins are
+never written to the GitHub state file.
 
 Push options:
-  --agent all|dsh|pi            Configuration kinds to transfer (default: all)
+  --agent all|dsh|pi            Plugin kinds to transfer (default: all)
   --profile NAME                DSH profile to read
-  --dry-run                     Show the snapshot without uploading
+  --dry-run                     Show the state without uploading
 
 Pull options:
-  --agent all|dsh|pi            Configuration kinds to import (default: all)
+  --agent all|dsh|pi            Plugin kinds to import (default: all)
   --profile NAME                Local DSH profile to update
-  --apply                       Apply the snapshot (default: plan only)
+  --apply                       Apply the state (default: plan only)
   --dry-run                     Show the plan without applying
 
 Common options:
@@ -44,6 +51,7 @@ Common options:
 type remoteOptions struct {
 	commonOptions
 	agent  string
+	branch string
 	apply  bool
 	dryRun bool
 }
@@ -51,6 +59,7 @@ type remoteOptions struct {
 func addRemoteFlags(set *flag.FlagSet, options *remoteOptions) {
 	addCommonFlags(set, &options.commonOptions)
 	set.StringVar(&options.agent, "agent", "all", "agents to transfer: all, dsh, or pi")
+	set.StringVar(&options.branch, "branch", "", "GitHub branch (default: config or main)")
 	set.BoolVar(&options.apply, "apply", false, "apply the pulled snapshot")
 	set.BoolVar(&options.dryRun, "dry-run", false, "plan without writing")
 }
@@ -68,6 +77,12 @@ func runRemote(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "list", "ls":
 		return runRemoteList(rest, stdout, stderr)
+	case "set":
+		return runRemoteSet(rest, stdout, stderr)
+	case "unset":
+		return runRemoteUnset(rest, stdout, stderr)
+	case "status":
+		return runRemoteStatus(rest, stdout, stderr)
 	case "add":
 		return runRemoteAdd(rest, stdout, stderr)
 	case "remove", "rm":
@@ -101,17 +116,121 @@ func runRemoteList(args []string, stdout, stderr io.Writer) int {
 	}
 	sort.Strings(names)
 	if options.json {
-		rows := make([]map[string]string, 0, len(names))
+		rows := make([]map[string]string, 0, len(names)+1)
+		if cfg.RemoteRepo != "" {
+			rows = append(rows, map[string]string{"type": "github", "repo": cfg.RemoteRepo, "branch": cfg.RemoteBranch})
+		}
 		for _, name := range names {
-			rows = append(rows, map[string]string{"name": name, "target": cfg.Peers[name]})
+			rows = append(rows, map[string]string{"type": "peer", "name": name, "target": cfg.Peers[name]})
 		}
 		writeJSON(stdout, rows)
 		return 0
 	}
 	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-	fmt.Fprintln(writer, "PEER\tSSH TARGET")
+	fmt.Fprintln(writer, "TYPE\tNAME\tTARGET")
+	if cfg.RemoteRepo != "" {
+		fmt.Fprintf(writer, "github\t%s\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch)
+	}
 	for _, name := range names {
-		fmt.Fprintf(writer, "%s\t%s\n", name, cfg.Peers[name])
+		fmt.Fprintf(writer, "peer\t%s\t%s\n", name, cfg.Peers[name])
+	}
+	_ = writer.Flush()
+	return 0
+}
+
+func runRemoteSet(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("remote set", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options remoteOptions
+	addRemoteFlags(set, &options)
+	positionals, err := parseInterspersed(set, args, map[string]bool{"branch": true})
+	if err != nil {
+		return 2
+	}
+	if len(positionals) == 2 && positionals[0] == "github" {
+		positionals = positionals[1:]
+	}
+	if len(positionals) != 1 {
+		fmt.Fprintln(stderr, "dshpm remote set: usage: dshpm remote set <owner/repo> [--branch main]")
+		return 2
+	}
+	repo := strings.TrimSpace(positionals[0])
+	if err := remotesync.ValidateRepo(repo); err != nil {
+		fmt.Fprintf(stderr, "dshpm remote set: %v\n", err)
+		return 2
+	}
+	cfg, err := loadConfig(options.commonOptions)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	cfg.RemoteRepo = repo
+	if options.branch != "" {
+		cfg.RemoteBranch = options.branch
+	}
+	if cfg.RemoteBranch == "" {
+		cfg.RemoteBranch = "main"
+	}
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(stderr, "dshpm: save config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "GITHUB\t%s\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch)
+	return 0
+}
+
+func runRemoteUnset(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("remote unset", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options remoteOptions
+	addRemoteFlags(set, &options)
+	if _, err := parseInterspersed(set, args, nil); err != nil {
+		return 2
+	}
+	cfg, err := loadConfig(options.commonOptions)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	cfg.RemoteRepo = ""
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(stderr, "dshpm: save config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "GITHUB\tunset")
+	return 0
+}
+
+func runRemoteStatus(args []string, stdout, stderr io.Writer) int {
+	set := flag.NewFlagSet("remote status", flag.ContinueOnError)
+	set.SetOutput(stderr)
+	var options remoteOptions
+	addRemoteFlags(set, &options)
+	if _, err := parseInterspersed(set, args, nil); err != nil {
+		return 2
+	}
+	cfg, err := loadConfig(options.commonOptions)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm: %v\n", err)
+		return 1
+	}
+	rows, err := remotesync.Status(cfg, options.profile, options.agent)
+	if err != nil {
+		fmt.Fprintf(stderr, "dshpm remote status: %v\n", err)
+		return 1
+	}
+	if options.json {
+		writeJSON(stdout, rows)
+		return 0
+	}
+	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+	fmt.Fprintln(writer, "AGENT\tPLUGIN\tKIND\tMANAGED\tSYNC\tSPEC")
+	for _, row := range rows {
+		managed := "yes"
+		if !row.Managed {
+			managed = "no"
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", row.Agent, row.Name, row.Kind, managed, row.Sync, row.Spec)
 	}
 	_ = writer.Flush()
 	return 0
@@ -193,20 +312,48 @@ func runRemotePush(args []string, stdout, stderr io.Writer) int {
 	set.SetOutput(stderr)
 	var options remoteOptions
 	addRemoteFlags(set, &options)
-	positionals, err := parseInterspersed(set, args, nil)
+	positionals, err := parseInterspersed(set, args, map[string]bool{"agent": true, "profile": true, "branch": true})
 	if err != nil {
 		return 2
 	}
-	if len(positionals) != 1 {
-		fmt.Fprintln(stderr, "dshpm remote push: usage: dshpm remote push <name> [options]")
+	if len(positionals) > 1 {
+		fmt.Fprintln(stderr, "dshpm remote push: usage: dshpm remote push [name] [options]")
 		return 2
 	}
-	name := positionals[0]
 	cfg, err := loadConfig(options.commonOptions)
 	if err != nil {
 		fmt.Fprintf(stderr, "dshpm: %v\n", err)
 		return 1
 	}
+	if len(positionals) == 0 {
+		if cfg.RemoteRepo == "" {
+			fmt.Fprintln(stderr, "dshpm remote push: no GitHub repository configured (run 'dshpm remote set <owner/repo>')")
+			return 2
+		}
+		state, err := remotesync.Build(cfg, options.profile, options.agent)
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm remote push: %v\n", err)
+			return 1
+		}
+		if options.json {
+			writeJSON(stdout, state)
+		} else {
+			fmt.Fprintf(stdout, "GITHUB\t%s\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch)
+			fmt.Fprintf(stdout, "STATE\t%d DSH plugins\t%d Pi packages\n", dshPluginCount(state), piPackageCount(state))
+		}
+		if options.dryRun {
+			fmt.Fprintln(stdout, "Dry run: no state was uploaded.")
+			return 0
+		}
+		client := remotesync.GitHub{GH: cfg.GH, Git: cfg.Git, Repo: cfg.RemoteRepo, Branch: cfg.RemoteBranch, CacheDir: cfg.RemoteCacheDir}
+		if err := client.Push(context.Background(), state); err != nil {
+			fmt.Fprintf(stderr, "dshpm remote push: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "PUSHED\t%s\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch)
+		return 0
+	}
+	name := positionals[0]
 	target, ok := cfg.Peers[name]
 	if !ok {
 		fmt.Fprintf(stderr, "dshpm remote push: unknown peer %q\n", name)
@@ -239,29 +386,82 @@ func runRemotePush(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func dshPluginCount(state *remotesync.State) int {
+	if state.DSH == nil {
+		return 0
+	}
+	return len(state.DSH.Plugins)
+}
+
+func piPackageCount(state *remotesync.State) int {
+	if state.Pi == nil {
+		return 0
+	}
+	return len(state.Pi.Packages)
+}
+
 func runRemotePull(args []string, stdout, stderr io.Writer) int {
 	set := flag.NewFlagSet("remote pull", flag.ContinueOnError)
 	set.SetOutput(stderr)
 	var options remoteOptions
 	addRemoteFlags(set, &options)
-	positionals, err := parseInterspersed(set, args, nil)
+	positionals, err := parseInterspersed(set, args, map[string]bool{"agent": true, "profile": true, "branch": true})
 	if err != nil {
 		return 2
 	}
-	if len(positionals) != 1 {
-		fmt.Fprintln(stderr, "dshpm remote pull: usage: dshpm remote pull <name> [options]")
+	if len(positionals) > 1 {
+		fmt.Fprintln(stderr, "dshpm remote pull: usage: dshpm remote pull [name] [options]")
 		return 2
 	}
 	if options.apply && options.dryRun {
 		fmt.Fprintln(stderr, "dshpm remote pull: --apply and --dry-run cannot be combined")
 		return 2
 	}
-	name := positionals[0]
 	cfg, err := loadConfig(options.commonOptions)
 	if err != nil {
 		fmt.Fprintf(stderr, "dshpm: %v\n", err)
 		return 1
 	}
+	if len(positionals) == 0 {
+		if cfg.RemoteRepo == "" {
+			fmt.Fprintln(stderr, "dshpm remote pull: no GitHub repository configured (run 'dshpm remote set <owner/repo>')")
+			return 2
+		}
+		client := remotesync.GitHub{GH: cfg.GH, Git: cfg.Git, Repo: cfg.RemoteRepo, Branch: cfg.RemoteBranch, CacheDir: cfg.RemoteCacheDir}
+		state, err := client.Pull(context.Background())
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
+			return 1
+		}
+		changes, err := remotesync.Plan(cfg, state, options.profile)
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
+			return 1
+		}
+		if options.json {
+			writeJSON(stdout, changes)
+		} else {
+			writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+			fmt.Fprintln(writer, "AGENT\tPLUGIN\tLOCAL\tREMOTE\tSTATUS")
+			for _, change := range changes {
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", change.Agent, change.Name, change.LocalSpec, change.RemoteSpec, change.Status)
+			}
+			_ = writer.Flush()
+		}
+		if !options.apply || options.dryRun {
+			fmt.Fprintln(stdout, "Plan only: rerun with --apply to import GitHub state.")
+			return 0
+		}
+		backupDir, err := remotesync.Apply(cfg, state, options.profile)
+		if err != nil {
+			fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "APPLIED\t%s\t%s\nBACKUP\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch, backupDir)
+		fmt.Fprintln(stdout, "Configuration imported; install or restart the agent runtime to apply it.")
+		return 0
+	}
+	name := positionals[0]
 	target, ok := cfg.Peers[name]
 	if !ok {
 		fmt.Fprintf(stderr, "dshpm remote pull: unknown peer %q\n", name)
