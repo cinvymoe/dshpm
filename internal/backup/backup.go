@@ -210,11 +210,15 @@ func Restore(options RestoreOptions) (*RestoreResult, error) {
 				return nil, fmt.Errorf("read backup file %s: %w", name, err)
 			}
 			destination := filepath.Join(target, name)
+			if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+				return nil, err
+			}
 			if current, err := os.ReadFile(destination); err == nil {
-				if err := os.MkdirAll(preserve, 0o755); err != nil {
+				preserved := filepath.Join(preserve, name)
+				if err := os.MkdirAll(filepath.Dir(preserved), 0o755); err != nil {
 					return nil, err
 				}
-				if err := os.WriteFile(filepath.Join(preserve, name), current, 0o644); err != nil {
+				if err := os.WriteFile(preserved, current, 0o644); err != nil {
 					return nil, fmt.Errorf("preserve current %s: %w", name, err)
 				}
 			}

@@ -23,6 +23,7 @@ const (
 // Plugin is one declared dependency of a DSH profile.
 type Plugin struct {
 	Name             string     `json:"name"`
+	Agent            string     `json:"agent,omitempty"`
 	Spec             string     `json:"spec"`
 	Kind             SourceKind `json:"kind"`
 	Managed          bool       `json:"managed"`

@@ -1,13 +1,15 @@
 # dshpm
 
-`dshpm` 是一个独立的 Go 命令行工具，用来管理安装在一个 DeepSeek Harness（DSH）profile 里的插件：
+`dshpm` 是一个独立的 Go 命令行工具，用来管理 DeepSeek Harness（DSH）与 Pi 两个 AI Agent 环境里的插件：
 
 - **区分本地版本和远程版本**：同时显示本地已安装版本 / 本地 checkout 的 commit，以及 npm registry 或 git 上游的最新版本。
+- **多 Agent**：`dshpm list` 管理 DSH profile，`dshpm pi list` 管理 Pi 用户设置中的 packages；`dshpm agents` 列出已检测到的 agent。
 - **备份**：备份 profile 的 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 等装配文件；git 本地插件保存为 patch，非 git 本地插件复制源码文件。
 - **同步与升级**：本地插件分为 `local`（默认无远程 Git；`sync` 发现未提交修改就拒绝并报告状态，不 stash/rebase；`upgrade` 也要求 checkout 干净）和 `local-remote`（带远程 Git 的本地 checkout，不管理本地修改；`sync` 始终把远程版本检出到独立 worktree，`upgrade` 构建该 worktree 并切换 profile）。`update` 保留旧的 patch 流程。
 - **卸载与历史还原**：卸载会清理 profile 依赖、bundle 与 `cordis.patch.yml` 引用并保留本地源码；`history` / `rollback` 可以按备份还原到任意历史状态。
 - **发布本地插件**：`publish` 使用 `gh` 把本地插件 checkout 初始化成 Git 仓库、创建 GitHub 仓库并推送，可选打 tag 和创建 Release；发布成功后默认把 profile 依赖切到 `github:OWNER/REPO` 远程管理。
-- **不改 DSH 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>` 和本地插件 checkout，不修改 DeepSeek Harness 仓库，也不会 commit 或 push 插件仓库。
+- **多设备同步**：`dshpm remote` 通过 SSH 把 DSH 与 Pi 的插件配置打包传到另一台设备；`remote pull --apply` 会先保留本地旧文件再导入。
+- **不改 DSH/Pi 源码**：`dshpm` 只操作 `~/.dsh/profiles/<profile>`、`~/.pi/agent` 和本地插件 checkout，不修改 DSH/Pi 仓库，也不会 commit 或 push 插件仓库。
 
 > 参考 [clidot](https://github.com/cinvymoe/clidot) 的思路：一个可被 clidot 纳管的独立 CLI 工具，而不是一个 DSH 插件。
 
@@ -18,7 +20,7 @@
 ```sh
 git clone https://github.com/cinvymoe/dshpm.git
 cd dshpm
-go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.5.8" -o dshpm ./cmd/dshpm
+go build -trimpath -ldflags "-s -w -X github.com/cinvymoe/dshpm/internal/version.Version=0.6.0" -o dshpm ./cmd/dshpm
 install -m 0755 dshpm ~/.local/bin/dshpm
 ```
 
@@ -72,6 +74,18 @@ dshpm rollback --apply
 # 发布一个本地插件到 GitHub（默认 private；--public 用 --visibility public）
 dshpm publish dsh-message-model-badge --dry-run
 dshpm publish dsh-message-model-badge
+
+# 查看已检测到的 AI Agent
+dshpm agents
+
+# 查看 Pi 插件
+dshpm pi list
+dshpm pi doctor
+
+# 配置一台远端设备，然后 push/pull 插件配置
+dshpm remote add nas user@nas
+dshpm remote push nas --dry-run
+dshpm remote pull nas --apply
 
 # 查看环境
 dshpm doctor
@@ -273,6 +287,54 @@ dshpm mode auto dsh-superagent
 
 `local` 覆盖保存在 `~/.config/dshpm/config.json` 的 `modes` 对象中，例如 `{"dsh-superagent":"local"}`；`auto` 会删除覆盖并恢复自动分类。切换到 `local` 后，`upgrade` 直接在本地目录构建；`sync` 对带 remote 的 checkout 不创建 worktree，有未提交修改时直接 `blocked`，干净时才 rebase。
 
+## Pi 插件管理
+
+Pi 的插件声明在 `~/.pi/agent/settings.json` 的 `packages` 数组中，元素可以是字符串（`"npm:pi-mcp-adapter"`）或对象（`{source, extensions, skills, prompts, themes}`）。`dshpm pi` 直接读写这份设置，不解析 Pi 的运行时状态：
+
+```sh
+# 列出 Pi packages、已安装版本和远程最新版本
+dshpm pi list
+
+# 只查询本地版本
+dshpm pi list --offline
+
+# 标记不管理的 Pi 包（upgrade 会跳过）
+dshpm pi unmanage pi-lens
+dshpm pi manage pi-lens
+
+# 备份 Pi settings、npm manifest 和本地包源码
+dshpm pi backup
+
+# 升级全部或指定 Pi 包
+dshpm pi upgrade --all --dry-run
+dshpm pi upgrade pi-lens
+
+# 卸载 Pi 包，保留本地源码
+dshpm pi uninstall pi-lens
+```
+
+Pi 的 registry 包通过 `pi update <source>` 升级，git 包通过 `pi` 解析并更新；`dshpm pi upgrade` 不会修改 Pi 的 `settings.json` 中已有的包来源。`dshpm pi backup` 的备份格式与 DSH 备份兼容，`dshpm pi restore` 会先展示计划，`--apply` 才写入。
+
+## 多设备 SSH 配置同步
+
+`dshpm remote` 把当前 DSH profile 与 Pi 用户设置中存在的配置文件打包成快照，通过系统 `ssh` 传到另一台设备；不需要远端安装额外服务：
+
+```sh
+# 添加/查看/移除设备（ssh target 可以是 user@host 或 ~/.ssh/config 中的别名）
+dshpm remote add nas user@nas
+dshpm remote list
+
+# 上传本地配置到远端（只上传实际存在的文件）
+dshpm remote push nas --dry-run
+dshpm remote push nas
+
+# 查看远端配置与本地差异；--apply 才写入
+dshpm remote pull nas
+dshpm remote pull nas --apply
+```
+
+同步的 DSH 文件为 profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`、`cordis.yml`、`compatibility.json`；Pi 文件为 `settings.json`、`settings-extensions.json` 以及 `npm/package.json`、`npm/package-lock.json`、`npm/bun.lock`。`remote pull --apply` 会先把本地旧文件保存到 `~/.config/dshpm/backups/sync-<时间>/`，再原子替换；导入后需自行执行 `pnpm install` / `pi update --extensions` 或重启对应 agent。远端快照默认放在 `~/.cache/dshpm/peers/<name>/`，可通过配置中的 `remoteRoot` 修改。
+
 ## 更新安全规则
 
 1. 修改任何文件前，先自动创建一次备份（`--no-backup` 可关闭）。
@@ -292,19 +354,26 @@ dshpm mode auto dsh-superagent
 {
   "dshHome": "~/.dsh",
   "defaultProfile": "web",
+  "defaultAgent": "dsh",
+  "piHome": "~/.pi/agent",
   "backupDir": "~/.config/dshpm/backups",
   "worktreeRoot": "/data/project/dshpm-worktrees",
   "unmanaged": [],
+  "unmanagedByAgent": {},
   "modes": {},
   "npmRegistry": "https://registry.npmjs.org",
   "pnpmRegistry": "https://registry.npmjs.org",
   "pnpm": "pnpm",
   "git": "git",
-  "gh": "gh"
+  "gh": "gh",
+  "pi": "pi",
+  "ssh": "ssh",
+  "remoteRoot": "~/.cache/dshpm/peers",
+  "peers": {}
 }
 ```
 
-`unmanaged` 是永不自动更新/同步/升级的插件名列表；`modes` 是本地插件的模式覆盖（目前支持 `{"dsh-superagent":"local"}`）；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入，适合本机 npm 镜像不可用时切回官方源。`worktreeRoot` 是 `local-remote` 同步时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
+`unmanaged` 是永不自动更新/同步/升级的 DSH 插件名列表；`unmanagedByAgent` 记录其他 agent（如 `{"pi":["pi-lens"]}`）的不管理列表；`modes` 是本地插件的模式覆盖；`piHome` 是 Pi 用户配置目录；`peers` 是 `remote` 命令使用的 `名称 → ssh target` 映射；`remoteRoot` 是远端快照目录；`npmRegistry` 用于查询版本；`pnpmRegistry` 会作为 `pnpm add --registry` 传入。`worktreeRoot` 是 `local-remote` 同步时存放远程 worktree 的根目录。`dshpm init` 会写入一份默认配置。所有命令也支持 `--dsh-home`、`--pi-home`、`--profile` 和环境变量 `DSHPM_PROFILE`。
 
 ## 命令一览
 
@@ -323,7 +392,10 @@ dshpm mode auto dsh-superagent
 | `dshpm sync <name...>` / `--all` | 同步本地 checkout：local 有脏文件时 blocked，干净时 rebase；local-remote 到远程 worktree |
 | `dshpm upgrade <name...>` / `--all` | 升级插件；`local` 直接构建，`local-remote` 构建 worktree |
 | `dshpm update <name...>` / `--all` | 旧的 patch 式更新；`--dry-run` 只做计划 |
-| `dshpm profiles` | 列出 profile 与依赖数量 |
+| `dshpm profiles` | 列出 DSH profile 与依赖数量 |
+| `dshpm agents` | 列出已检测到的 AI Agent |
+| `dshpm pi <command>` | 管理 Pi packages（list/manage/backup/upgrade/uninstall/doctor 等） |
+| `dshpm remote <command>` | 通过 SSH 推送/拉取 DSH 与 Pi 配置快照 |
 | `dshpm doctor` | 检查 DSH 目录、git、pnpm |
 | `dshpm init` | 写默认配置文件 |
 | `dshpm version` | 打印版本 |

@@ -12,17 +12,24 @@ import (
 
 // Config is the optional user configuration stored at ~/.config/dshpm/config.json.
 type Config struct {
-	DSHHome        string            `json:"dshHome,omitempty"`
-	DefaultProfile string            `json:"defaultProfile,omitempty"`
-	BackupDir      string            `json:"backupDir,omitempty"`
-	WorktreeRoot   string            `json:"worktreeRoot,omitempty"`
-	Unmanaged      []string          `json:"unmanaged,omitempty"`
-	Modes          map[string]string `json:"modes,omitempty"`
-	NPMRegistry    string            `json:"npmRegistry,omitempty"`
-	PNPMRegistry   string            `json:"pnpmRegistry,omitempty"`
-	PNPM           string            `json:"pnpm,omitempty"`
-	Git            string            `json:"git,omitempty"`
-	GH             string            `json:"gh,omitempty"`
+	DSHHome          string              `json:"dshHome,omitempty"`
+	DefaultProfile   string              `json:"defaultProfile,omitempty"`
+	DefaultAgent     string              `json:"defaultAgent,omitempty"`
+	PiHome           string              `json:"piHome,omitempty"`
+	BackupDir        string              `json:"backupDir,omitempty"`
+	WorktreeRoot     string              `json:"worktreeRoot,omitempty"`
+	Unmanaged        []string            `json:"unmanaged,omitempty"`
+	UnmanagedByAgent map[string][]string `json:"unmanagedByAgent,omitempty"`
+	Modes            map[string]string   `json:"modes,omitempty"`
+	NPMRegistry      string              `json:"npmRegistry,omitempty"`
+	PNPMRegistry     string              `json:"pnpmRegistry,omitempty"`
+	PNPM             string              `json:"pnpm,omitempty"`
+	Git              string              `json:"git,omitempty"`
+	GH               string              `json:"gh,omitempty"`
+	Pi               string              `json:"pi,omitempty"`
+	SSH              string              `json:"ssh,omitempty"`
+	RemoteRoot       string              `json:"remoteRoot,omitempty"`
+	Peers            map[string]string   `json:"peers,omitempty"`
 }
 
 // Resolved is a Config with empty values replaced by defaults and paths
@@ -32,9 +39,22 @@ type Resolved struct {
 	ConfigPath string
 }
 
-// IsManaged reports whether dshpm may update the named plugin.
+// IsManaged reports whether dshpm may update the named DSH plugin.
 func (c Resolved) IsManaged(name string) bool {
-	for _, unmanaged := range c.Unmanaged {
+	return c.IsManagedFor("dsh", name)
+}
+
+// IsManagedFor reports whether dshpm may update the named plugin for one
+// agent. DSH keeps using the historical top-level unmanaged list.
+func (c Resolved) IsManagedFor(agent, name string) bool {
+	if agent == "" || agent == "dsh" {
+		for _, unmanaged := range c.Unmanaged {
+			if unmanaged == name {
+				return false
+			}
+		}
+	}
+	for _, unmanaged := range c.UnmanagedByAgent[agent] {
 		if unmanaged == name {
 			return false
 		}
@@ -42,22 +62,54 @@ func (c Resolved) IsManaged(name string) bool {
 	return true
 }
 
-// SetManaged adds or removes a plugin from the unmanaged list.
+// SetManaged adds or removes a DSH plugin from the unmanaged list.
 func (c *Resolved) SetManaged(name string, managed bool) {
+	c.SetManagedFor("dsh", name, managed)
+}
+
+// SetManagedFor adds or removes a plugin from one agent's unmanaged list.
+func (c *Resolved) SetManagedFor(agent, name string, managed bool) {
+	if agent == "" || agent == "dsh" {
+		if managed {
+			kept := c.Unmanaged[:0]
+			for _, unmanaged := range c.Unmanaged {
+				if unmanaged != name {
+					kept = append(kept, unmanaged)
+				}
+			}
+			c.Unmanaged = kept
+		} else if c.IsManaged(name) {
+			c.Unmanaged = append(c.Unmanaged, name)
+		}
+		return
+	}
+	list := c.UnmanagedByAgent[agent]
 	if managed {
-		kept := c.Unmanaged[:0]
-		for _, unmanaged := range c.Unmanaged {
+		kept := list[:0]
+		for _, unmanaged := range list {
 			if unmanaged != name {
 				kept = append(kept, unmanaged)
 			}
 		}
-		c.Unmanaged = kept
+		if len(kept) == 0 {
+			delete(c.UnmanagedByAgent, agent)
+			if len(c.UnmanagedByAgent) == 0 {
+				c.UnmanagedByAgent = nil
+			}
+			return
+		}
+		c.UnmanagedByAgent[agent] = kept
 		return
 	}
-	if !c.IsManaged(name) {
-		return
+	for _, unmanaged := range list {
+		if unmanaged == name {
+			return
+		}
 	}
-	c.Unmanaged = append(c.Unmanaged, name)
+	if c.UnmanagedByAgent == nil {
+		c.UnmanagedByAgent = make(map[string][]string)
+	}
+	c.UnmanagedByAgent[agent] = append(list, name)
 }
 
 // Mode returns the configured local mode for a plugin. An empty value means
@@ -130,6 +182,12 @@ func LoadFile(configPath string) (Resolved, error) {
 	if cfg.DSHHome == "" {
 		cfg.DSHHome = filepath.Join(home, ".dsh")
 	}
+	if cfg.PiHome == "" {
+		cfg.PiHome = filepath.Join(home, ".pi", "agent")
+	}
+	if cfg.DefaultAgent == "" {
+		cfg.DefaultAgent = "dsh"
+	}
 	if cfg.BackupDir == "" {
 		cfg.BackupDir = filepath.Join(home, ".config", "dshpm", "backups")
 	}
@@ -148,9 +206,20 @@ func LoadFile(configPath string) (Resolved, error) {
 	if cfg.GH == "" {
 		cfg.GH = "gh"
 	}
+	if cfg.Pi == "" {
+		cfg.Pi = "pi"
+	}
+	if cfg.SSH == "" {
+		cfg.SSH = "ssh"
+	}
+	if cfg.RemoteRoot == "" {
+		cfg.RemoteRoot = filepath.Join(home, ".cache", "dshpm", "peers")
+	}
 	cfg.DSHHome = expandPath(cfg.DSHHome, home)
+	cfg.PiHome = expandPath(cfg.PiHome, home)
 	cfg.BackupDir = expandPath(cfg.BackupDir, home)
 	cfg.WorktreeRoot = expandPath(cfg.WorktreeRoot, home)
+	cfg.RemoteRoot = expandPath(cfg.RemoteRoot, home)
 	return Resolved{Config: cfg, ConfigPath: configPath}, nil
 }
 

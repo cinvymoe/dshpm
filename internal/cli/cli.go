@@ -21,10 +21,11 @@ import (
 	"github.com/cinvymoe/dshpm/internal/version"
 )
 
-const usage = `dshpm manages plugins installed in a DeepSeek Harness profile.
+const usage = `dshpm manages plugins installed in supported AI agent environments.
 
 Usage:
   dshpm <command> [options]
+  dshpm pi <command> [options]
 
 Commands:
   list                 Show plugins, versions, and management status
@@ -44,6 +45,9 @@ Commands:
   upgrade [names...]   Upgrade plugins; choose --build-source auto|worktree|local
   update [names...]    Update plugins with the legacy patch-based flow
   profiles             List DSH profiles and dependency counts
+  agents               List supported AI agents
+  pi <command>         Manage Pi plugins (see 'dshpm pi help')
+  remote <command>     Sync plugin configuration between devices over SSH
   doctor               Check the runtime environment
   init                 Write a default config file
   version              Print the dshpm version
@@ -52,6 +56,7 @@ Commands:
 Common options:
   --profile NAME       DSH profile (default: config, DSHPM_PROFILE, or web)
   --dsh-home DIR       DSH home (default: ~/.dsh)
+  --pi-home DIR        Pi agent directory (default: ~/.pi/agent)
   --config FILE        Config file (default: ~/.config/dshpm/config.json)
   --json               Machine-readable output
   --offline            Skip remote version lookups
@@ -100,6 +105,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runUpdate(rest, stdout, stderr)
 	case "profiles":
 		return runProfiles(rest, stdout, stderr)
+	case "agents":
+		return runAgents(rest, stdout, stderr)
+	case "pi":
+		return runPi(rest, stdout, stderr)
+	case "remote":
+		return runRemote(rest, stdout, stderr)
 	case "doctor":
 		return runDoctor(rest, stdout, stderr)
 	case "init":
@@ -113,6 +124,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 type commonOptions struct {
 	profile string
 	dshHome string
+	piHome  string
 	config  string
 	json    bool
 	offline bool
@@ -121,6 +133,7 @@ type commonOptions struct {
 func addCommonFlags(set *flag.FlagSet, options *commonOptions) {
 	set.StringVar(&options.profile, "profile", "", "DSH profile name")
 	set.StringVar(&options.dshHome, "dsh-home", "", "DSH home directory")
+	set.StringVar(&options.piHome, "pi-home", "", "Pi agent directory")
 	set.StringVar(&options.config, "config", "", "config file path")
 	set.BoolVar(&options.json, "json", false, "machine-readable output")
 	set.BoolVar(&options.offline, "offline", false, "skip remote lookups")
@@ -133,6 +146,9 @@ func loadConfig(options commonOptions) (config.Resolved, error) {
 	}
 	if options.dshHome != "" {
 		cfg.DSHHome = options.dshHome
+	}
+	if options.piHome != "" {
+		cfg.PiHome = options.piHome
 	}
 	if options.config != "" {
 		cfg.ConfigPath = options.config
@@ -698,7 +714,15 @@ func parseInterspersed(set *flag.FlagSet, args []string, valueFlags map[string]b
 			if equals := strings.IndexByte(name, '='); equals >= 0 {
 				name = name[:equals]
 			}
-			if valueFlags[name] && !strings.Contains(arg, "=") && index+1 < len(args) {
+			takesValue := valueFlags[name]
+			if defined := set.Lookup(name); defined != nil {
+				if boolFlag, ok := defined.Value.(interface{ IsBoolFlag() bool }); !ok || !boolFlag.IsBoolFlag() {
+					takesValue = true
+				} else {
+					takesValue = false
+				}
+			}
+			if takesValue && !strings.Contains(arg, "=") && index+1 < len(args) {
 				index++
 				flagArgs = append(flagArgs, args[index])
 			}
@@ -826,12 +850,17 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	cfg := config.Config{
 		DSHHome:        filepath.Join(home, ".dsh"),
 		DefaultProfile: "web",
+		DefaultAgent:   "dsh",
+		PiHome:         filepath.Join(home, ".pi", "agent"),
 		BackupDir:      filepath.Join(home, ".config", "dshpm", "backups"),
 		WorktreeRoot:   filepath.Join("/data", "project", "dshpm-worktrees"),
 		NPMRegistry:    "https://registry.npmjs.org",
 		PNPM:           "pnpm",
 		Git:            "git",
 		GH:             "gh",
+		Pi:             "pi",
+		SSH:            "ssh",
+		RemoteRoot:     filepath.Join(home, ".cache", "dshpm", "peers"),
 	}
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
