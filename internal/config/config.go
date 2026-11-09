@@ -33,6 +33,15 @@ type Config struct {
 	RemoteBranch     string              `json:"remoteBranch,omitempty"`
 	RemoteCacheDir   string              `json:"remoteCacheDir,omitempty"`
 	Peers            map[string]string   `json:"peers,omitempty"`
+	// SyncLocalSources controls whether SSH peer snapshots also carry the
+	// source directories of local (link:/file:) DSH plugins. Nil means on.
+	SyncLocalSources *bool `json:"syncLocalSources,omitempty"`
+}
+
+// LocalSourcesSynced reports whether SSH peer snapshots include local
+// plugin source trees. Enabled unless explicitly switched off.
+func (c Config) LocalSourcesSynced() bool {
+	return c.SyncLocalSources == nil || *c.SyncLocalSources
 }
 
 // Resolved is a Config with empty values replaced by defaults and paths

@@ -32,6 +32,11 @@ Commands:
 GitHub sync stores only managed remote plugins. Local and unmanaged plugins are
 never written to the GitHub state file.
 
+SSH peer snapshots additionally carry the source trees of local (link:/file:)
+DSH plugins listed in the profile's package.json, so receivers can load them
+after a pull. Set "syncLocalSources": false in the config to transfer only the
+configuration files.
+
 Push options:
   --agent all|dsh|pi            Plugin kinds to transfer (default: all)
   --profile NAME                DSH profile to read

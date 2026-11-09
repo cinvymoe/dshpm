@@ -25,6 +25,13 @@ import (
 
 const manifestName = "manifest.json"
 
+// localAgent namespaces source-tree entries of link:/file: DSH plugins in a
+// snapshot. Snapshot version 2 carries these entries plus their roots.
+const localAgent = "plugin"
+
+// maxLocalFileBytes skips absurdly large files inside plugin sources.
+const maxLocalFileBytes = 16 << 20
+
 var dshFiles = []string{
 	"package.json",
 	"pnpm-lock.yaml",
@@ -48,6 +55,16 @@ type File struct {
 	Path   string `json:"path"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+	Mode   uint32 `json:"mode,omitempty"`
+}
+
+// perm returns the file mode to create the target with, defaulting to 0o644
+// for snapshots recorded before the mode field existed.
+func (f File) perm() os.FileMode {
+	if f.Mode != 0 {
+		return os.FileMode(f.Mode) & 0o777
+	}
+	return 0o644
 }
 
 // Manifest describes a configuration snapshot.
@@ -55,7 +72,121 @@ type Manifest struct {
 	Version    int       `json:"version"`
 	CreatedAt  time.Time `json:"createdAt"`
 	DSHProfile string    `json:"dshProfile,omitempty"`
+	Plugins    []Plugin  `json:"plugins,omitempty"`
 	Files      []File    `json:"files"`
+}
+
+// Plugin records one local (link:/file:) plugin source directory that the
+// snapshot carries under agent "plugin". Root is the absolute path on the
+// creating device; DSHHome is that device's dshHome when known, so receivers
+// with a different dshHome remap roots that live inside it.
+type Plugin struct {
+	Name    string `json:"name"`
+	Root    string `json:"root"`
+	DSHHome string `json:"dshHome,omitempty"`
+}
+
+// localPluginExcludedDirs are never captured from a plugin source tree.
+// .git stays so local-remote classification survives on the receiver.
+var localPluginExcludedDirs = map[string]bool{"node_modules": true}
+
+// pluginDirEscape converts a plugin name into one safe path segment.
+func pluginDirEscape(name string) string {
+	return strings.ReplaceAll(name, "/", "%")
+}
+
+func pluginDirUnescape(seg string) string {
+	return strings.ReplaceAll(seg, "%", "/")
+}
+
+// localPluginSpecs lists link:/file: dependencies of a profile package.json.
+func localPluginSpecs(pkgPath string) ([]Plugin, error) {
+	data, err := os.ReadFile(pkgPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var pkg struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return nil, nil // malformed package.json: config file itself still syncs
+	}
+	var plugins []Plugin
+	for _, set := range []map[string]string{pkg.Dependencies, pkg.DevDependencies} {
+		for name, spec := range set {
+			root, ok := strings.CutPrefix(spec, "link:")
+			if !ok {
+				root, ok = strings.CutPrefix(spec, "file:")
+			}
+			if !ok || root == "" {
+				continue
+			}
+			if !filepath.IsAbs(root) {
+				root = filepath.Join(filepath.Dir(pkgPath), root)
+			}
+			root = filepath.Clean(root)
+			info, err := os.Stat(root)
+			if err != nil || !info.IsDir() {
+				continue // broken or absent link target: nothing to carry
+			}
+			plugins = append(plugins, Plugin{Name: name, Root: root})
+		}
+	}
+	sort.Slice(plugins, func(i, j int) bool { return plugins[i].Name < plugins[j].Name })
+	return plugins, nil
+}
+
+// capturePlugin copies one plugin source tree into the snapshot and returns
+// its manifest file entries.
+func capturePlugin(dir string, p Plugin) ([]File, error) {
+	var files []File
+	prefix := pluginDirEscape(p.Name)
+	err := filepath.Walk(p.Root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(p.Root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if info.IsDir() {
+			if localPluginExcludedDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() || info.Size() > maxLocalFileBytes {
+			return nil
+		}
+		if rel == ".git/index" || strings.HasSuffix(filepath.ToSlash(rel), "/.git/index") {
+			return nil // git staging state is device-local
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256(data)
+		dst := filepath.Join(dir, localAgent, filepath.FromSlash(prefix+"/"+filepath.ToSlash(rel)))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
+			return err
+		}
+		files = append(files, File{Agent: localAgent, Path: prefix + "/" + filepath.ToSlash(rel), Size: info.Size(), SHA256: hex.EncodeToString(hash[:]), Mode: uint32(info.Mode().Perm())})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return files, nil
 }
 
 // Change reports how a remote snapshot differs from local configuration.
@@ -103,7 +234,7 @@ func Create(cfg config.Resolved, profileName, agent string) (string, *Manifest, 
 		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
 			return err
 		}
-		manifest.Files = append(manifest.Files, File{Agent: agentName, Path: rel, Size: info.Size(), SHA256: hex.EncodeToString(hash[:])})
+		manifest.Files = append(manifest.Files, File{Agent: agentName, Path: rel, Size: info.Size(), SHA256: hex.EncodeToString(hash[:]), Mode: uint32(info.Mode().Perm())})
 		return nil
 	}
 	if agent == "all" || agent == "dsh" {
@@ -116,6 +247,27 @@ func Create(cfg config.Resolved, profileName, agent string) (string, *Manifest, 
 		for _, rel := range dshFiles {
 			if err := add("dsh", root, rel); err != nil {
 				return "", nil, err
+			}
+		}
+		if cfg.LocalSourcesSynced() {
+			plugins, err := localPluginSpecs(filepath.Join(root, "package.json"))
+			if err != nil {
+				return "", nil, fmt.Errorf("scan local plugin sources: %w", err)
+			}
+			for _, p := range plugins {
+				files, err := capturePlugin(dir, p)
+				if err != nil {
+					return "", nil, fmt.Errorf("capture plugin source %s: %w", p.Name, err)
+				}
+				if len(files) == 0 {
+					continue
+				}
+				p.DSHHome = cfg.DSHHome
+				manifest.Plugins = append(manifest.Plugins, p)
+				manifest.Files = append(manifest.Files, files...)
+			}
+			if len(manifest.Plugins) > 0 {
+				manifest.Version = 2
 			}
 		}
 	}
@@ -155,10 +307,20 @@ func Read(dir string) (*Manifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, fmt.Errorf("parse snapshot manifest: %w", err)
 	}
-	if manifest.Version != 1 {
+	if manifest.Version != 1 && manifest.Version != 2 {
 		return nil, fmt.Errorf("unsupported snapshot version %d", manifest.Version)
 	}
+	pluginDirs := map[string]bool{}
+	for _, p := range manifest.Plugins {
+		pluginDirs[pluginDirEscape(p.Name)] = true
+	}
 	for _, file := range manifest.Files {
+		if file.Agent == localAgent {
+			dirName, _, ok := strings.Cut(file.Path, "/")
+			if !ok || !pluginDirs[dirName] {
+				return nil, fmt.Errorf("snapshot plugin file %s: no matching plugin root", file.Path)
+			}
+		}
 		path := filepath.Join(dir, file.Agent, filepath.FromSlash(file.Path))
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -176,7 +338,7 @@ func Read(dir string) (*Manifest, error) {
 func Plan(cfg config.Resolved, profileName string, manifest *Manifest) ([]Change, error) {
 	changes := make([]Change, 0, len(manifest.Files))
 	for _, file := range manifest.Files {
-		target, err := targetPath(cfg, profileName, file, manifest.DSHProfile)
+		target, err := targetPath(cfg, profileName, file, manifest)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +361,7 @@ func Plan(cfg config.Resolved, profileName string, manifest *Manifest) ([]Change
 func Apply(cfg config.Resolved, profileName, snapshotDir string, manifest *Manifest) (string, error) {
 	backupDir := filepath.Join(cfg.BackupDir, "sync-"+time.Now().Format("20060102-150405"))
 	for _, file := range manifest.Files {
-		target, err := targetPath(cfg, profileName, file, manifest.DSHProfile)
+		target, err := targetPath(cfg, profileName, file, manifest)
 		if err != nil {
 			return "", err
 		}
@@ -225,7 +387,7 @@ func Apply(cfg config.Resolved, profileName, snapshotDir string, manifest *Manif
 			return "", err
 		}
 		tmp := target + ".dshpm-tmp"
-		if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		if err := os.WriteFile(tmp, data, file.perm()); err != nil {
 			return "", err
 		}
 		if err := os.Rename(tmp, target); err != nil {
@@ -236,22 +398,47 @@ func Apply(cfg config.Resolved, profileName, snapshotDir string, manifest *Manif
 	return backupDir, nil
 }
 
-func targetPath(cfg config.Resolved, profileName string, file File, fallbackProfile string) (string, error) {
+func targetPath(cfg config.Resolved, profileName string, file File, manifest *Manifest) (string, error) {
 	switch file.Agent {
 	case "dsh":
 		name, err := cfg.ResolveProfileName(profileName)
 		if err != nil {
-			if fallbackProfile == "" {
+			if manifest.DSHProfile == "" {
 				return "", err
 			}
-			name = fallbackProfile
+			name = manifest.DSHProfile
 		}
 		return filepath.Join(cfg.DSHHome, "profiles", name, filepath.FromSlash(file.Path)), nil
 	case "pi":
 		return filepath.Join(cfg.PiHome, filepath.FromSlash(file.Path)), nil
+	case localAgent:
+		dirName, rel, ok := strings.Cut(file.Path, "/")
+		if !ok || rel == "" {
+			return "", fmt.Errorf("snapshot plugin file %q: malformed path", file.Path)
+		}
+		for _, p := range manifest.Plugins {
+			if pluginDirEscape(p.Name) != dirName {
+				continue
+			}
+			return filepath.Join(pluginTargetRoot(cfg, p), filepath.FromSlash(rel)), nil
+		}
+		return "", fmt.Errorf("snapshot plugin file %q: no matching plugin root", file.Path)
 	default:
 		return "", fmt.Errorf("unknown snapshot agent %q", file.Agent)
 	}
+}
+
+// pluginTargetRoot remaps a source root recorded on one device onto this
+// device: roots inside the sender's dshHome follow the receiver's dshHome,
+// anything else keeps its absolute path.
+func pluginTargetRoot(cfg config.Resolved, p Plugin) string {
+	if p.DSHHome != "" && cfg.DSHHome != "" {
+		prefix := filepath.Clean(p.DSHHome) + string(filepath.Separator)
+		if rel, ok := strings.CutPrefix(filepath.Clean(p.Root), prefix); ok {
+			return filepath.Join(cfg.DSHHome, rel)
+		}
+	}
+	return filepath.Clean(p.Root)
 }
 
 // Client transfers snapshots to and from one peer through SSH.
