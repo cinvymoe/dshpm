@@ -32,7 +32,9 @@ const localAgent = "plugin"
 // maxLocalFileBytes skips absurdly large files inside plugin sources.
 const maxLocalFileBytes = 16 << 20
 
-var dshFiles = []string{
+// DSHFiles lists the profile-level configuration files captured for DSH.
+// Every managed profile contributes its own copy under agent "dsh".
+var DSHFiles = []string{
 	"package.json",
 	"pnpm-lock.yaml",
 	"pnpm-workspace.yaml",
@@ -41,7 +43,8 @@ var dshFiles = []string{
 	"compatibility.json",
 }
 
-var piFiles = []string{
+// PiFiles lists the configuration files captured for Pi under agent "pi".
+var PiFiles = []string{
 	"settings.json",
 	"settings-extensions.json",
 	"npm/package.json",
@@ -49,13 +52,15 @@ var piFiles = []string{
 	"npm/bun.lock",
 }
 
-// File describes one file in a configuration snapshot.
+// File describes one file in a configuration snapshot. Profile is the DSH
+// profile the file belongs to (empty for Pi and local plugin sources).
 type File struct {
-	Agent  string `json:"agent"`
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
-	Mode   uint32 `json:"mode,omitempty"`
+	Agent   string `json:"agent"`
+	Profile string `json:"profile,omitempty"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256"`
+	Mode    uint32 `json:"mode,omitempty"`
 }
 
 // perm returns the file mode to create the target with, defaulting to 0o644
@@ -67,7 +72,9 @@ func (f File) perm() os.FileMode {
 	return 0o644
 }
 
-// Manifest describes a configuration snapshot.
+// Manifest describes a configuration snapshot. Version 3 snapshots carry a
+// Profile field on every DSH file; DSHProfile only exists for legacy v1/v2
+// snapshots and is ignored when reading v3.
 type Manifest struct {
 	Version    int       `json:"version"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -77,10 +84,12 @@ type Manifest struct {
 }
 
 // Plugin records one local (link:/file:) plugin source directory that the
-// snapshot carries under agent "plugin". Root is the absolute path on the
-// creating device; DSHHome is that device's dshHome when known, so receivers
-// with a different dshHome remap roots that live inside it.
+// snapshot carries under agent "plugin". Profile names the DSH profile whose
+// package.json references it. Root is the absolute path on the creating
+// device; DSHHome is that device's dshHome when known, so receivers with a
+// different dshHome remap roots that live inside it.
 type Plugin struct {
+	Profile string `json:"profile,omitempty"`
 	Name    string `json:"name"`
 	Root    string `json:"root"`
 	DSHHome string `json:"dshHome,omitempty"`
@@ -196,9 +205,25 @@ type Change struct {
 	Status string
 }
 
+// snapshotVersion is the manifest version written by this build. Version 3
+// snapshots carry a Profile field on every DSH file; readers still accept
+// legacy v1 (single profile) and v2 (single profile + plugin sources).
+const snapshotVersion = 3
+
+// snapshotStagingPath returns where a file lives inside a snapshot directory.
+// DSH files with a profile are staged per profile so snapshots with several
+// profiles never overwrite each other; plugin and Pi files are flat.
+func snapshotStagingPath(dir string, file File) string {
+	if file.Agent == "dsh" && file.Profile != "" {
+		return filepath.Join(dir, file.Agent, file.Profile, filepath.FromSlash(file.Path))
+	}
+	return filepath.Join(dir, file.Agent, filepath.FromSlash(file.Path))
+}
+
 // Create writes a snapshot of the selected agent configuration into a
-// temporary directory and returns its path and manifest.
-func Create(cfg config.Resolved, profileName, agent string) (string, *Manifest, error) {
+// temporary directory and returns its path and manifest. DSH snapshots cover
+// every managed profile, not just the default one.
+func Create(cfg config.Resolved, agent string) (string, *Manifest, error) {
 	if agent == "" {
 		agent = "all"
 	}
@@ -209,8 +234,8 @@ func Create(cfg config.Resolved, profileName, agent string) (string, *Manifest, 
 	if err != nil {
 		return "", nil, err
 	}
-	manifest := &Manifest{Version: 1, CreatedAt: time.Now()}
-	add := func(agentName, root, rel string) error {
+	manifest := &Manifest{Version: snapshotVersion, CreatedAt: time.Now()}
+	add := func(agentName, profile, root, rel string) error {
 		src := filepath.Join(root, rel)
 		info, err := os.Stat(src)
 		if err != nil {
@@ -227,34 +252,47 @@ func Create(cfg config.Resolved, profileName, agent string) (string, *Manifest, 
 			return err
 		}
 		hash := sha256.Sum256(data)
-		dst := filepath.Join(dir, agentName, filepath.FromSlash(rel))
+		dst := snapshotStagingPath(dir, File{Agent: agentName, Profile: profile, Path: rel})
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
 		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
 			return err
 		}
-		manifest.Files = append(manifest.Files, File{Agent: agentName, Path: rel, Size: info.Size(), SHA256: hex.EncodeToString(hash[:]), Mode: uint32(info.Mode().Perm())})
+		manifest.Files = append(manifest.Files, File{Agent: agentName, Profile: profile, Path: rel, Size: info.Size(), SHA256: hex.EncodeToString(hash[:]), Mode: uint32(info.Mode().Perm())})
 		return nil
 	}
 	if agent == "all" || agent == "dsh" {
-		name, err := cfg.ResolveProfileName(profileName)
+		profiles, err := cfg.ListProfiles()
 		if err != nil {
 			return "", nil, err
 		}
-		manifest.DSHProfile = name
-		root := filepath.Join(cfg.DSHHome, "profiles", name)
-		for _, rel := range dshFiles {
-			if err := add("dsh", root, rel); err != nil {
-				return "", nil, err
-			}
+		if len(profiles) == 0 {
+			return "", nil, fmt.Errorf("no DSH profile found under %s", filepath.Join(cfg.DSHHome, "profiles"))
 		}
-		if cfg.LocalSourcesSynced() {
+		seen := map[string]string{} // escaped plugin name -> source root
+		for _, name := range profiles {
+			root := filepath.Join(cfg.DSHHome, "profiles", name)
+			for _, rel := range DSHFiles {
+				if err := add("dsh", name, root, rel); err != nil {
+					return "", nil, err
+				}
+			}
+			if !cfg.LocalSourcesSynced() {
+				continue
+			}
 			plugins, err := localPluginSpecs(filepath.Join(root, "package.json"))
 			if err != nil {
 				return "", nil, fmt.Errorf("scan local plugin sources: %w", err)
 			}
 			for _, p := range plugins {
+				key := pluginDirEscape(p.Name)
+				if prev, ok := seen[key]; ok {
+					if prev != p.Root {
+						return "", nil, fmt.Errorf("plugin %s resolves to multiple roots across profiles (%s, %s)", p.Name, prev, p.Root)
+					}
+					continue // already captured from an earlier profile
+				}
 				files, err := capturePlugin(dir, p)
 				if err != nil {
 					return "", nil, fmt.Errorf("capture plugin source %s: %w", p.Name, err)
@@ -262,18 +300,17 @@ func Create(cfg config.Resolved, profileName, agent string) (string, *Manifest, 
 				if len(files) == 0 {
 					continue
 				}
+				seen[key] = p.Root
+				p.Profile = name
 				p.DSHHome = cfg.DSHHome
 				manifest.Plugins = append(manifest.Plugins, p)
 				manifest.Files = append(manifest.Files, files...)
 			}
-			if len(manifest.Plugins) > 0 {
-				manifest.Version = 2
-			}
 		}
 	}
 	if agent == "all" || agent == "pi" {
-		for _, rel := range piFiles {
-			if err := add("pi", cfg.PiHome, rel); err != nil {
+		for _, rel := range PiFiles {
+			if err := add("pi", "", cfg.PiHome, rel); err != nil {
 				return "", nil, err
 			}
 		}
@@ -307,7 +344,7 @@ func Read(dir string) (*Manifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, fmt.Errorf("parse snapshot manifest: %w", err)
 	}
-	if manifest.Version != 1 && manifest.Version != 2 {
+	if manifest.Version < 1 || manifest.Version > snapshotVersion {
 		return nil, fmt.Errorf("unsupported snapshot version %d", manifest.Version)
 	}
 	pluginDirs := map[string]bool{}
@@ -321,7 +358,7 @@ func Read(dir string) (*Manifest, error) {
 				return nil, fmt.Errorf("snapshot plugin file %s: no matching plugin root", file.Path)
 			}
 		}
-		path := filepath.Join(dir, file.Agent, filepath.FromSlash(file.Path))
+		path := snapshotStagingPath(dir, file)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read snapshot file %s: %w", file.Path, err)
@@ -361,12 +398,21 @@ func Plan(cfg config.Resolved, profileName string, manifest *Manifest) ([]Change
 func Apply(cfg config.Resolved, profileName, snapshotDir string, manifest *Manifest) (string, error) {
 	backupDir := filepath.Join(cfg.BackupDir, "sync-"+time.Now().Format("20060102-150405"))
 	for _, file := range manifest.Files {
+		if file.Agent == "pi" && cfg.PiHome == "" {
+			return "", fmt.Errorf("snapshot contains Pi files but piHome is not configured")
+		}
 		target, err := targetPath(cfg, profileName, file, manifest)
 		if err != nil {
 			return "", err
 		}
 		if data, err := os.ReadFile(target); err == nil {
-			backupPath := filepath.Join(backupDir, file.Agent, filepath.FromSlash(file.Path))
+			// Keep the profile in the backup layout so files from
+			// different profiles cannot overwrite each other.
+			backupRel := file.Path
+			if file.Profile != "" {
+				backupRel = filepath.Join(file.Profile, file.Path)
+			}
+			backupPath := filepath.Join(backupDir, file.Agent, backupRel)
 			if err := os.MkdirAll(filepath.Dir(backupPath), 0o755); err != nil {
 				return "", err
 			}
@@ -374,7 +420,7 @@ func Apply(cfg config.Resolved, profileName, snapshotDir string, manifest *Manif
 				return "", err
 			}
 		}
-		source := filepath.Join(snapshotDir, file.Agent, filepath.FromSlash(file.Path))
+		source := snapshotStagingPath(snapshotDir, file)
 		data, err := os.ReadFile(source)
 		if err != nil {
 			return "", err
@@ -401,12 +447,18 @@ func Apply(cfg config.Resolved, profileName, snapshotDir string, manifest *Manif
 func targetPath(cfg config.Resolved, profileName string, file File, manifest *Manifest) (string, error) {
 	switch file.Agent {
 	case "dsh":
-		name, err := cfg.ResolveProfileName(profileName)
-		if err != nil {
-			if manifest.DSHProfile == "" {
-				return "", err
+		name := file.Profile
+		if name == "" {
+			// Legacy v1/v2 snapshots carry no per-file profile; fall back to
+			// the flag, then the manifest's recorded profile, then resolution.
+			resolved, err := cfg.ResolveProfileName(profileName)
+			if err != nil {
+				if manifest.DSHProfile == "" {
+					return "", err
+				}
+				resolved = manifest.DSHProfile
 			}
-			name = manifest.DSHProfile
+			name = resolved
 		}
 		return filepath.Join(cfg.DSHHome, "profiles", name, filepath.FromSlash(file.Path)), nil
 	case "pi":

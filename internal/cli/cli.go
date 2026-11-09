@@ -47,7 +47,7 @@ Commands:
   profiles             List DSH profiles and dependency counts
   agents               List supported AI agents
   pi <command>         Manage Pi plugins (see 'dshpm pi help')
-  remote <command>     Sync plugin configuration through GitHub or SSH
+  remote <command>     Back up and restore configuration through GitHub or SSH
   doctor               Check the runtime environment
   init                 Write a default config file
   version              Print the dshpm version

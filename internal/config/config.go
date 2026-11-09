@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -281,6 +282,28 @@ func (c Resolved) ResolveProfileName(explicit string) (string, error) {
 		return "", fmt.Errorf("no DSH profile found under %s", filepath.Join(c.DSHHome, "profiles"))
 	}
 	return "", fmt.Errorf("multiple DSH profiles found (%s); use --profile", strings.Join(candidates, ", "))
+}
+
+// ListProfiles returns the names of all DSH profiles under <dshHome>/profiles
+// that contain a package.json, sorted alphabetically. Internal directories
+// (node_modules, dot-directories) are skipped.
+func (c Resolved) ListProfiles() ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(c.DSHHome, "profiles"))
+	if err != nil {
+		return nil, fmt.Errorf("read DSH profiles under %s: %w", filepath.Join(c.DSHHome, "profiles"), err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "node_modules" || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(c.DSHHome, "profiles", entry.Name(), "package.json")); err != nil {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func expandPath(path, home string) string {

@@ -14,38 +14,43 @@ import (
 	"github.com/cinvymoe/dshpm/internal/remotesync"
 )
 
-const remoteUsage = `dshpm remote synchronizes plugin configuration between devices.
+const remoteUsage = `dshpm remote backs up and restores configuration between devices.
 
 Usage:
   dshpm remote <command> [options]
 
 Commands:
   list                          List configured GitHub repository and SSH peers
-  set <owner/repo>              Use a private GitHub repository for remote sync
-  unset                         Disable GitHub remote sync
-  status                        Show managed plugins by remote/local classification
+  set <owner/repo>              Use a private GitHub repository for config backup
+  unset                         Disable GitHub config backup
   add <name> <ssh-target>       Add or replace an SSH peer
   remove <name>                 Remove an SSH peer
-  push [name] [options]         Upload remote plugin state to GitHub or an SSH peer
-  pull [name] [options]         Show or import remote plugin state
+  push [name] [options]         Upload config to GitHub or send a snapshot to an SSH peer
+  pull [name] [options]         Restore config from GitHub or import a snapshot from an SSH peer
 
-GitHub sync stores only managed remote plugins. Local and unmanaged plugins are
-never written to the GitHub state file.
+GitHub backup stores configuration files only: every DSH profile (package.json,
+lockfiles, cordis config) plus the Pi configuration. It never stores plugin
+installation state. Pull restores these files locally (existing files are
+backed up first; nothing is deleted), which is the cold-start path for a new
+machine.
 
-SSH peer snapshots additionally carry the source trees of local (link:/file:)
-DSH plugins listed in the profile's package.json, so receivers can load them
-after a pull. Set "syncLocalSources": false in the config to transfer only the
-configuration files.
+SSH peer snapshots carry the same configuration for every profile plus the
+source trees of local (link:/file:) DSH plugins listed in each profile's
+package.json, so receivers can load them after a pull. Set "syncLocalSources":
+false in the config to transfer only the configuration files. Machine-to-
+machine sync is SSH-only.
 
-Push options:
-  --agent all|dsh|pi            Plugin kinds to transfer (default: all)
-  --profile NAME                DSH profile to read
-  --dry-run                     Show the state without uploading
+Push options (GitHub):
+  --agent all|dsh|pi            Sections to upload (default: all)
+  --dry-run                     Show the files without uploading
+
+Push options (SSH peer):
+  --agent all|dsh|pi            Sections to transfer (default: all)
+  --dry-run                     Show the snapshot without sending
 
 Pull options:
-  --agent all|dsh|pi            Plugin kinds to import (default: all)
-  --profile NAME                Local DSH profile to update
-  --apply                       Apply the state (default: plan only)
+  --agent all|dsh|pi            Sections to restore (default: all)
+  --apply                       Apply the restore (default: plan only)
   --dry-run                     Show the plan without applying
 
 Common options:
@@ -63,7 +68,7 @@ type remoteOptions struct {
 
 func addRemoteFlags(set *flag.FlagSet, options *remoteOptions) {
 	addCommonFlags(set, &options.commonOptions)
-	set.StringVar(&options.agent, "agent", "all", "agents to transfer: all, dsh, or pi")
+	set.StringVar(&options.agent, "agent", "all", "sections to transfer: all, dsh, or pi")
 	set.StringVar(&options.branch, "branch", "", "GitHub branch (default: config or main)")
 	set.BoolVar(&options.apply, "apply", false, "apply the pulled snapshot")
 	set.BoolVar(&options.dryRun, "dry-run", false, "plan without writing")
@@ -86,8 +91,6 @@ func runRemote(args []string, stdout, stderr io.Writer) int {
 		return runRemoteSet(rest, stdout, stderr)
 	case "unset":
 		return runRemoteUnset(rest, stdout, stderr)
-	case "status":
-		return runRemoteStatus(rest, stdout, stderr)
 	case "add":
 		return runRemoteAdd(rest, stdout, stderr)
 	case "remove", "rm":
@@ -206,41 +209,6 @@ func runRemoteUnset(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runRemoteStatus(args []string, stdout, stderr io.Writer) int {
-	set := flag.NewFlagSet("remote status", flag.ContinueOnError)
-	set.SetOutput(stderr)
-	var options remoteOptions
-	addRemoteFlags(set, &options)
-	if _, err := parseInterspersed(set, args, nil); err != nil {
-		return 2
-	}
-	cfg, err := loadConfig(options.commonOptions)
-	if err != nil {
-		fmt.Fprintf(stderr, "dshpm: %v\n", err)
-		return 1
-	}
-	rows, err := remotesync.Status(cfg, options.profile, options.agent)
-	if err != nil {
-		fmt.Fprintf(stderr, "dshpm remote status: %v\n", err)
-		return 1
-	}
-	if options.json {
-		writeJSON(stdout, rows)
-		return 0
-	}
-	writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-	fmt.Fprintln(writer, "AGENT\tPLUGIN\tKIND\tMANAGED\tSYNC\tSPEC")
-	for _, row := range rows {
-		managed := "yes"
-		if !row.Managed {
-			managed = "no"
-		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", row.Agent, row.Name, row.Kind, managed, row.Sync, row.Spec)
-	}
-	_ = writer.Flush()
-	return 0
-}
-
 func runRemoteAdd(args []string, stdout, stderr io.Writer) int {
 	set := flag.NewFlagSet("remote add", flag.ContinueOnError)
 	set.SetOutput(stderr)
@@ -335,23 +303,29 @@ func runRemotePush(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "dshpm remote push: no GitHub repository configured (run 'dshpm remote set <owner/repo>')")
 			return 2
 		}
-		state, err := remotesync.Build(cfg, options.profile, options.agent)
+		entries, err := remotesync.DryRun(cfg, options.agent)
 		if err != nil {
 			fmt.Fprintf(stderr, "dshpm remote push: %v\n", err)
 			return 1
 		}
 		if options.json {
-			writeJSON(stdout, state)
+			writeJSON(stdout, entries)
 		} else {
 			fmt.Fprintf(stdout, "GITHUB\t%s\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch)
-			fmt.Fprintf(stdout, "STATE\t%d DSH plugins\t%d Pi packages\n", dshPluginCount(state), piPackageCount(state))
+			fmt.Fprintf(stdout, "FILES\t%d\n", len(entries))
+			writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
+			fmt.Fprintln(writer, "AGENT\tPROFILE\tPATH\tSIZE")
+			for _, entry := range entries {
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%d\n", entry.Agent, entry.Profile, entry.Path, entry.Size)
+			}
+			_ = writer.Flush()
 		}
 		if options.dryRun {
-			fmt.Fprintln(stdout, "Dry run: no state was uploaded.")
+			fmt.Fprintln(stdout, "Dry run: no files were uploaded.")
 			return 0
 		}
 		client := remotesync.GitHub{GH: cfg.GH, Git: cfg.Git, Repo: cfg.RemoteRepo, Branch: cfg.RemoteBranch, CacheDir: cfg.RemoteCacheDir}
-		if err := client.Push(context.Background(), state); err != nil {
+		if _, err := client.Push(context.Background(), cfg, options.agent); err != nil {
 			fmt.Fprintf(stderr, "dshpm remote push: %v\n", err)
 			return 1
 		}
@@ -364,7 +338,7 @@ func runRemotePush(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dshpm remote push: unknown peer %q\n", name)
 		return 1
 	}
-	snapshotDir, manifest, err := devicesync.Create(cfg, options.profile, options.agent)
+	snapshotDir, manifest, err := devicesync.Create(cfg, options.agent)
 	if err != nil {
 		fmt.Fprintf(stderr, "dshpm remote push: %v\n", err)
 		return 1
@@ -373,9 +347,9 @@ func runRemotePush(args []string, stdout, stderr io.Writer) int {
 	if options.json {
 		writeJSON(stdout, manifest)
 	} else {
-		fmt.Fprintf(stdout, "SNAPSHOT\t%s\t%d files\n", manifest.CreatedAt.Format("2006-01-02 15:04:05"), len(manifest.Files))
+		fmt.Fprintf(stdout, "SNAPSHOT\t%s\tv%d\t%d files\n", manifest.CreatedAt.Format("2006-01-02 15:04:05"), manifest.Version, len(manifest.Files))
 		for _, file := range manifest.Files {
-			fmt.Fprintf(stdout, "FILE\t%s\t%s\t%d\n", file.Agent, file.Path, file.Size)
+			fmt.Fprintf(stdout, "FILE\t%s\t%s\t%s\t%d\n", file.Agent, file.Profile, file.Path, file.Size)
 		}
 	}
 	if options.dryRun {
@@ -389,20 +363,6 @@ func runRemotePush(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "PUSHED\t%s\t%s\n", name, cfg.RemoteRoot)
 	return 0
-}
-
-func dshPluginCount(state *remotesync.State) int {
-	if state.DSH == nil {
-		return 0
-	}
-	return len(state.DSH.Plugins)
-}
-
-func piPackageCount(state *remotesync.State) int {
-	if state.Pi == nil {
-		return 0
-	}
-	return len(state.Pi.Packages)
 }
 
 func runRemotePull(args []string, stdout, stderr io.Writer) int {
@@ -433,12 +393,12 @@ func runRemotePull(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		client := remotesync.GitHub{GH: cfg.GH, Git: cfg.Git, Repo: cfg.RemoteRepo, Branch: cfg.RemoteBranch, CacheDir: cfg.RemoteCacheDir}
-		state, err := client.Pull(context.Background())
+		files, err := client.Fetch(context.Background(), options.agent)
 		if err != nil {
 			fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
 			return 1
 		}
-		changes, err := remotesync.Plan(cfg, state, options.profile)
+		changes, err := remotesync.Plan(cfg, options.agent, files)
 		if err != nil {
 			fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
 			return 1
@@ -447,23 +407,23 @@ func runRemotePull(args []string, stdout, stderr io.Writer) int {
 			writeJSON(stdout, changes)
 		} else {
 			writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-			fmt.Fprintln(writer, "AGENT\tPLUGIN\tLOCAL\tREMOTE\tSTATUS")
+			fmt.Fprintln(writer, "AGENT\tPROFILE\tPATH\tTARGET\tSTATUS")
 			for _, change := range changes {
-				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", change.Agent, change.Name, change.LocalSpec, change.RemoteSpec, change.Status)
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", change.Agent, change.Profile, change.Path, change.Target, change.Status)
 			}
 			_ = writer.Flush()
 		}
 		if !options.apply || options.dryRun {
-			fmt.Fprintln(stdout, "Plan only: rerun with --apply to import GitHub state.")
+			fmt.Fprintln(stdout, "Plan only: rerun with --apply to restore configuration from GitHub.")
 			return 0
 		}
-		backupDir, err := remotesync.Apply(cfg, state, options.profile)
+		_, backupDir, err := client.Apply(context.Background(), cfg, options.agent)
 		if err != nil {
 			fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "APPLIED\t%s\t%s\nBACKUP\t%s\n", cfg.RemoteRepo, cfg.RemoteBranch, backupDir)
-		fmt.Fprintln(stdout, "Configuration imported; install or restart the agent runtime to apply it.")
+		fmt.Fprintln(stdout, "Configuration restored; install or restart the agent runtime to apply it.")
 		return 0
 	}
 	name := positionals[0]
@@ -488,7 +448,8 @@ func runRemotePull(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
 		return 1
 	}
-	changes, err := devicesync.Plan(cfg, options.profile, manifest)
+	// Profile resolution happens per file; the flag no longer selects one.
+	changes, err := devicesync.Plan(cfg, "", manifest)
 	if err != nil {
 		fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
 		return 1
@@ -497,9 +458,9 @@ func runRemotePull(args []string, stdout, stderr io.Writer) int {
 		writeJSON(stdout, changes)
 	} else {
 		writer := tabwriter.NewWriter(stdout, 2, 2, 2, ' ', 0)
-		fmt.Fprintln(writer, "AGENT\tPATH\tTARGET\tSTATUS")
+		fmt.Fprintln(writer, "AGENT\tPROFILE\tPATH\tTARGET\tSTATUS")
 		for _, change := range changes {
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", change.Agent, change.Path, change.Target, change.Status)
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", change.Agent, change.Profile, change.Path, change.Target, change.Status)
 		}
 		_ = writer.Flush()
 	}
@@ -507,7 +468,7 @@ func runRemotePull(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "Plan only: rerun with --apply to import the snapshot.")
 		return 0
 	}
-	backupDir, err := devicesync.Apply(cfg, options.profile, tmp, manifest)
+	backupDir, err := devicesync.Apply(cfg, "", tmp, manifest)
 	if err != nil {
 		fmt.Fprintf(stderr, "dshpm remote pull: %v\n", err)
 		return 1

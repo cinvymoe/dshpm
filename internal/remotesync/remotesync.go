@@ -1,12 +1,17 @@
-// Package remotesync synchronizes the managed remote plugin set through a
-// private GitHub repository. Local and unmanaged plugins stay device-local.
+// Package remotesync backs up and restores DSH and Pi configuration files
+// through a private GitHub repository. The repository stores a configuration
+// file tree (profiles/<name>/... and pi/...) that mirrors local configuration;
+// plugin installation state is no longer part of it. Machine-to-machine
+// plugin sync uses the SSH backend (internal/devicesync).
 package remotesync
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,666 +21,149 @@ import (
 	"time"
 
 	"github.com/cinvymoe/dshpm/internal/config"
-	"github.com/cinvymoe/dshpm/internal/model"
-	"github.com/cinvymoe/dshpm/internal/profile"
+	"github.com/cinvymoe/dshpm/internal/devicesync"
 )
 
-const stateName = "dshpm-state.json"
+const (
+	// legacyStateName belonged to the retired plugin-state sync format and is
+	// cleaned out of the repository on the next push.
+	legacyStateName = "dshpm-state.json"
 
-// State is the portable description of managed remote plugins.
-type State struct {
-	Version   int       `json:"version"`
-	CreatedAt time.Time `json:"createdAt"`
-	DSH       *DSHState `json:"dsh,omitempty"`
-	Pi        *PiState  `json:"pi,omitempty"`
+	profileDirName = "profiles" // repository subtree for DSH profile config
+	piDirName      = "pi"       // repository subtree for Pi config
+)
+
+// ConfigFile describes one configuration file tracked in the backup repository.
+type ConfigFile struct {
+	Agent   string `json:"agent"`             // "dsh" or "pi"
+	Profile string `json:"profile,omitempty"` // DSH profile name; empty for Pi
+	Path    string `json:"path"`              // slash-separated path inside the agent root
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256"`
 }
 
-// DSHState is the remote plugin inventory for one DSH profile.
-type DSHState struct {
-	Profile string   `json:"profile"`
-	Plugins []Plugin `json:"plugins"`
-	Bundles []string `json:"bundles,omitempty"`
+// ConfigChange reports how one repository file differs from local configuration.
+type ConfigChange struct {
+	ConfigFile
+	Target string `json:"target"`
+	Status string `json:"status"` // add | update | same
 }
 
-// PiState is the remote package inventory for Pi.
-type PiState struct {
-	Packages []Package `json:"packages"`
+// configSource pairs a tracked file with its local path.
+type configSource struct {
+	entry     ConfigFile
+	localPath string
 }
 
-// Plugin is one remote DSH dependency.
-type Plugin struct {
-	Name    string `json:"name"`
-	Spec    string `json:"spec"`
-	Kind    string `json:"kind"`
-	Version string `json:"version,omitempty"`
-}
-
-// Package is one remote Pi package entry. Raw preserves object forms such as
-// extension filters; Source is the canonical identity used for merging.
-type Package struct {
-	Name    string          `json:"name"`
-	Source  string          `json:"source"`
-	Kind    string          `json:"kind"`
-	Version string          `json:"version,omitempty"`
-	Raw     json.RawMessage `json:"raw,omitempty"`
-}
-
-// Change describes one plugin entry that would change on pull.
-type Change struct {
-	Agent      string `json:"agent"`
-	Name       string `json:"name"`
-	LocalSpec  string `json:"localSpec,omitempty"`
-	RemoteSpec string `json:"remoteSpec,omitempty"`
-	Status     string `json:"status"`
-}
-
-// StatusRow reports whether one managed plugin is synchronized remotely.
-type StatusRow struct {
-	Agent   string `json:"agent"`
-	Name    string `json:"name"`
-	Kind    string `json:"kind"`
-	Managed bool   `json:"managed"`
-	Sync    string `json:"sync"`
-	Spec    string `json:"spec"`
-}
-
-// Build creates a state containing only managed remote plugins.
-func Build(cfg config.Resolved, profileName, agent string) (*State, error) {
+// collectConfigSources lists every configuration file that belongs in the
+// repository for the requested agents. agent is all, dsh, or pi; local files
+// that do not exist are skipped.
+func collectConfigSources(cfg config.Resolved, agent string) ([]configSource, error) {
 	if agent == "" {
 		agent = "all"
 	}
 	if agent != "all" && agent != "dsh" && agent != "pi" {
 		return nil, fmt.Errorf("unknown agent %q (want all, dsh, or pi)", agent)
 	}
-	state := &State{Version: 1, CreatedAt: time.Now().UTC()}
+	var sources []configSource
 	if agent == "all" || agent == "dsh" {
-		dsh, err := buildDSH(cfg, profileName)
+		profiles, err := cfg.ListProfiles()
 		if err != nil {
 			return nil, err
 		}
-		state.DSH = dsh
+		if len(profiles) == 0 {
+			return nil, fmt.Errorf("no DSH profile found under %s", filepath.Join(cfg.DSHHome, "profiles"))
+		}
+		for _, name := range profiles {
+			root := filepath.Join(cfg.DSHHome, "profiles", name)
+			for _, rel := range devicesync.DSHFiles {
+				src := filepath.Join(root, filepath.FromSlash(rel))
+				if _, err := os.Stat(src); err != nil {
+					if errors.Is(err, os.ErrNotExist) {
+						continue
+					}
+					return nil, err
+				}
+				sources = append(sources, configSource{entry: ConfigFile{Agent: "dsh", Profile: name, Path: rel}, localPath: src})
+			}
+		}
 	}
 	if agent == "all" || agent == "pi" {
-		pi, err := buildPi(cfg)
+		for _, rel := range devicesync.PiFiles {
+			src := filepath.Join(cfg.PiHome, filepath.FromSlash(rel))
+			if _, err := os.Stat(src); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return nil, err
+			}
+			sources = append(sources, configSource{entry: ConfigFile{Agent: "pi", Path: rel}, localPath: src})
+		}
+	}
+	sort.Slice(sources, func(i, j int) bool {
+		a, b := sources[i].entry, sources[j].entry
+		if a.Agent != b.Agent {
+			return a.Agent < b.Agent
+		}
+		if a.Profile != b.Profile {
+			return a.Profile < b.Profile
+		}
+		return a.Path < b.Path
+	})
+	return sources, nil
+}
+
+// DryRun lists the configuration files that Push would upload, without
+// touching the repository.
+func DryRun(cfg config.Resolved, agent string) ([]ConfigFile, error) {
+	sources, err := collectConfigSources(cfg, agent)
+	if err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no %s configuration files found", agent)
+	}
+	entries := make([]ConfigFile, 0, len(sources))
+	for _, source := range sources {
+		sum, size, err := hashFile(source.localPath)
 		if err != nil {
 			return nil, err
 		}
-		state.Pi = pi
-	}
-	if state.DSH == nil && state.Pi == nil {
-		return nil, errors.New("no managed remote plugins found")
-	}
-	return state, nil
-}
-
-func buildDSH(cfg config.Resolved, profileName string) (*DSHState, error) {
-	name, err := cfg.ResolveProfileName(profileName)
-	if err != nil {
-		return nil, err
-	}
-	p, err := profile.Load(cfg.DSHHome, name)
-	if err != nil {
-		return nil, err
-	}
-	plugins := p.Plugins()
-	local := make(map[string]bool)
-	result := &DSHState{Profile: name}
-	for _, plugin := range plugins {
-		if plugin.Kind == model.SourceLocal || plugin.Kind == model.SourceLocalRemote || !cfg.IsManagedFor("dsh", plugin.Name) {
-			local[plugin.Name] = true
-			continue
-		}
-		result.Plugins = append(result.Plugins, Plugin{
-			Name: plugin.Name, Spec: plugin.Spec, Kind: string(plugin.Kind), Version: plugin.InstalledVersion,
-		})
-	}
-	for _, bundle := range p.Bundles {
-		if local[bundle] || !cfg.IsManagedFor("dsh", bundle) {
-			continue
-		}
-		result.Bundles = append(result.Bundles, bundle)
-	}
-	if len(result.Plugins) == 0 && len(result.Bundles) == 0 {
-		return nil, nil
-	}
-	sort.Slice(result.Plugins, func(i, j int) bool { return result.Plugins[i].Name < result.Plugins[j].Name })
-	return result, nil
-}
-
-type piEntry struct {
-	Source string
-	Name   string
-	Kind   model.SourceKind
-	Raw    json.RawMessage
-}
-
-func buildPi(cfg config.Resolved) (*PiState, error) {
-	entries, err := readPiEntries(cfg.PiHome)
-	if err != nil {
-		return nil, err
-	}
-	result := &PiState{}
-	for _, entry := range entries {
-		if entry.Kind == model.SourceLocal || entry.Kind == model.SourceLocalRemote || !cfg.IsManagedFor("pi", entry.Name) {
-			continue
-		}
-		version := readPackageVersion(filepath.Join(cfg.PiHome, "npm", "node_modules", filepath.FromSlash(entry.Name), "package.json"))
-		result.Packages = append(result.Packages, Package{
-			Name: entry.Name, Source: entry.Source, Kind: string(entry.Kind), Version: version, Raw: entry.Raw,
-		})
-	}
-	if len(result.Packages) == 0 {
-		return nil, nil
-	}
-	sort.Slice(result.Packages, func(i, j int) bool { return result.Packages[i].Name < result.Packages[j].Name })
-	return result, nil
-}
-
-func readPiEntries(home string) ([]piEntry, error) {
-	data, err := os.ReadFile(filepath.Join(home, "settings.json"))
-	if err != nil {
-		return nil, fmt.Errorf("read Pi settings: %w", err)
-	}
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("parse Pi settings: %w", err)
-	}
-	raw, ok := root["packages"]
-	if !ok {
-		return nil, nil
-	}
-	var items []json.RawMessage
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, fmt.Errorf("parse Pi packages: %w", err)
-	}
-	entries := make([]piEntry, 0, len(items))
-	for _, item := range items {
-		source, err := packageSource(item)
-		if err != nil {
-			return nil, err
-		}
-		if source == "" {
-			continue
-		}
-		entries = append(entries, piEntry{Source: source, Name: piPackageName(source), Kind: classifyPiSource(source, home), Raw: item})
+		entry := source.entry
+		entry.Size = size
+		entry.SHA256 = sum
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
 
-func packageSource(raw json.RawMessage) (string, error) {
-	var source string
-	if err := json.Unmarshal(raw, &source); err == nil {
-		return strings.TrimSpace(source), nil
-	}
-	var object struct {
-		Source string `json:"source"`
-	}
-	if err := json.Unmarshal(raw, &object); err != nil {
-		return "", fmt.Errorf("parse Pi package entry: %w", err)
-	}
-	return strings.TrimSpace(object.Source), nil
-}
-
-func piPackageName(source string) string {
-	value := source
-	for _, prefix := range []string{"npm:", "git+", "git:", "github:"} {
-		if strings.HasPrefix(value, prefix) {
-			value = strings.TrimPrefix(value, prefix)
-			break
-		}
-	}
-	if index := strings.LastIndex(value, "#"); index >= 0 {
-		value = value[:index]
-	}
-	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "ssh://") {
-		value = strings.TrimSuffix(value, "/")
-		value = strings.TrimSuffix(value, ".git")
-		if index := strings.LastIndex(value, "/"); index >= 0 {
-			return value[index+1:]
-		}
-	}
-	if strings.HasPrefix(value, "@") {
-		// npm scoped name, optionally followed by @version.
-		at := strings.LastIndex(value, "@")
-		if at > 0 {
-			return value[:at]
-		}
-		return value
-	}
-	if index := strings.LastIndex(value, "@"); index > 0 {
-		value = value[:index]
-	}
-	value = strings.TrimSuffix(strings.TrimSuffix(value, "/"), ".git")
-	if index := strings.LastIndex(value, "/"); index >= 0 {
-		value = value[index+1:]
-	}
-	return value
-}
-
-func classifyPiSource(source, home string) model.SourceKind {
-	switch {
-	case strings.HasPrefix(source, "npm:"):
-		return model.SourceRegistry
-	case strings.HasPrefix(source, "git:"), strings.HasPrefix(source, "git+"), strings.HasPrefix(source, "github:"),
-		strings.HasSuffix(strings.Split(source, "#")[0], ".git"):
-		return model.SourceGit
-	case strings.HasPrefix(source, "file:"), strings.HasPrefix(source, "./"), strings.HasPrefix(source, "../"),
-		strings.HasPrefix(source, "/"), strings.HasPrefix(source, "~/"):
-		return model.SourceLocal
+// repoRelPath returns the repository-relative path for a tracked file.
+func repoRelPath(entry ConfigFile) string {
+	switch entry.Agent {
+	case "dsh":
+		return filepath.Join(profileDirName, entry.Profile, filepath.FromSlash(entry.Path))
+	case "pi":
+		return filepath.Join(piDirName, filepath.FromSlash(entry.Path))
 	default:
-		return model.SourceRegistry
-	}
-}
-
-func readPackageVersion(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
 		return ""
 	}
-	var pkg struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(data, &pkg); err != nil {
+}
+
+// localTargetPath maps a tracked file onto this machine's configuration tree.
+func localTargetPath(cfg config.Resolved, entry ConfigFile) string {
+	switch entry.Agent {
+	case "dsh":
+		return filepath.Join(cfg.DSHHome, "profiles", entry.Profile, filepath.FromSlash(entry.Path))
+	case "pi":
+		return filepath.Join(cfg.PiHome, filepath.FromSlash(entry.Path))
+	default:
 		return ""
 	}
-	return pkg.Version
-}
-
-// ReadState reads a state file.
-func ReadState(path string) (*State, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("parse state: %w", err)
-	}
-	if state.Version != 1 {
-		return nil, fmt.Errorf("unsupported state version %d", state.Version)
-	}
-	return &state, nil
-}
-
-// WriteState writes a state file atomically.
-func WriteState(path string, state *State) error {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// Plan compares a remote state with local configuration.
-func Plan(cfg config.Resolved, state *State, profileName string) ([]Change, error) {
-	var changes []Change
-	if state.DSH != nil {
-		name := state.DSH.Profile
-		if profileName != "" {
-			name = profileName
-		}
-		p, err := profile.Load(cfg.DSHHome, name)
-		if err != nil {
-			return nil, err
-		}
-		local := p.Dependencies
-		remote := make(map[string]bool)
-		for _, plugin := range state.DSH.Plugins {
-			remote[plugin.Name] = true
-			current, ok := local[plugin.Name]
-			status := "add"
-			if ok && current == plugin.Spec {
-				status = "same"
-			} else if ok {
-				status = "update"
-			}
-			changes = append(changes, Change{Agent: "dsh", Name: plugin.Name, LocalSpec: current, RemoteSpec: plugin.Spec, Status: status})
-		}
-		for name, spec := range local {
-			kind := profile.Classify(name, spec, p.Dir).Kind
-			if (kind == model.SourceLocal || kind == model.SourceLocalRemote) || !cfg.IsManagedFor("dsh", name) || remote[name] {
-				continue
-			}
-			changes = append(changes, Change{Agent: "dsh", Name: name, LocalSpec: spec, Status: "remove"})
-		}
-	}
-	if state.Pi != nil {
-		entries, err := readPiEntries(cfg.PiHome)
-		if err != nil {
-			return nil, err
-		}
-		local := make(map[string]string)
-		for _, entry := range entries {
-			local[entry.Name] = entry.Source
-		}
-		remote := make(map[string]bool)
-		for _, pkg := range state.Pi.Packages {
-			remote[pkg.Name] = true
-			current, ok := local[pkg.Name]
-			status := "add"
-			if ok && current == pkg.Source {
-				status = "same"
-			} else if ok {
-				status = "update"
-			}
-			changes = append(changes, Change{Agent: "pi", Name: pkg.Name, LocalSpec: current, RemoteSpec: pkg.Source, Status: status})
-		}
-		for _, entry := range entries {
-			if entry.Kind == model.SourceLocal || entry.Kind == model.SourceLocalRemote || !cfg.IsManagedFor("pi", entry.Name) || remote[entry.Name] {
-				continue
-			}
-			changes = append(changes, Change{Agent: "pi", Name: entry.Name, LocalSpec: entry.Source, Status: "remove"})
-		}
-	}
-	sort.Slice(changes, func(i, j int) bool {
-		if changes[i].Agent != changes[j].Agent {
-			return changes[i].Agent < changes[j].Agent
-		}
-		return changes[i].Name < changes[j].Name
-	})
-	return changes, nil
-}
-
-// Apply merges the remote state into local package manifests. Local and
-// unmanaged entries are preserved.
-func Apply(cfg config.Resolved, state *State, profileName string) (string, error) {
-	backupDir := filepath.Join(cfg.BackupDir, "github-"+time.Now().Format("20060102-150405"))
-	if state.DSH != nil {
-		name := state.DSH.Profile
-		if profileName != "" {
-			name = profileName
-		} else if resolved, err := cfg.ResolveProfileName(""); err == nil {
-			name = resolved
-		}
-		dir := filepath.Join(cfg.DSHHome, "profiles", name)
-		source := filepath.Join(dir, "package.json")
-		if data, err := os.ReadFile(source); err == nil {
-			dst := filepath.Join(backupDir, "dsh", "package.json")
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-				return "", err
-			}
-			if err := os.WriteFile(dst, data, 0o644); err != nil {
-				return "", err
-			}
-		}
-		if err := applyDSH(cfg, dir, state.DSH); err != nil {
-			return "", err
-		}
-	}
-	if state.Pi != nil {
-		source := filepath.Join(cfg.PiHome, "settings.json")
-		if data, err := os.ReadFile(source); err == nil {
-			dst := filepath.Join(backupDir, "pi", "settings.json")
-			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-				return "", err
-			}
-			if err := os.WriteFile(dst, data, 0o644); err != nil {
-				return "", err
-			}
-		}
-		if err := applyPi(cfg, state.Pi); err != nil {
-			return "", err
-		}
-	}
-	return backupDir, nil
-}
-
-func applyDSH(cfg config.Resolved, dir string, remote *DSHState) error {
-	path := filepath.Join(dir, "package.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
-	}
-	deps := stringMap(root["dependencies"])
-	dev := stringMap(root["devDependencies"])
-	if deps == nil {
-		deps = map[string]string{}
-	}
-	if dev == nil {
-		dev = map[string]string{}
-	}
-	remoteNames := make(map[string]string, len(remote.Plugins))
-	for _, plugin := range remote.Plugins {
-		remoteNames[plugin.Name] = plugin.Spec
-	}
-	remove := func(items map[string]string) {
-		for name, spec := range items {
-			kind := profile.Classify(name, spec, dir).Kind
-			if kind == model.SourceLocal || kind == model.SourceLocalRemote || !cfg.IsManagedFor("dsh", name) {
-				continue
-			}
-			if _, ok := remoteNames[name]; !ok {
-				delete(items, name)
-			}
-		}
-	}
-	remove(deps)
-	remove(dev)
-	for name, spec := range remoteNames {
-		if _, ok := deps[name]; ok {
-			deps[name] = spec
-		} else if _, ok := dev[name]; ok {
-			dev[name] = spec
-		} else {
-			deps[name] = spec
-		}
-	}
-	root["dependencies"] = mustMarshal(deps)
-	if len(dev) > 0 {
-		root["devDependencies"] = mustMarshal(dev)
-	}
-	if err := setBundles(root, remote.Bundles, deps, dev, cfg, dir); err != nil {
-		return err
-	}
-	return writeJSONFile(path, root)
-}
-
-func setBundles(root map[string]json.RawMessage, remote []string, deps, dev map[string]string, cfg config.Resolved, dir string) error {
-	var dsh map[string]json.RawMessage
-	if raw, ok := root["dsh"]; ok {
-		if err := json.Unmarshal(raw, &dsh); err != nil {
-			return fmt.Errorf("parse dsh: %w", err)
-		}
-	}
-	if dsh == nil {
-		dsh = map[string]json.RawMessage{}
-	}
-	var profileField map[string]json.RawMessage
-	if raw, ok := dsh["profile"]; ok {
-		if err := json.Unmarshal(raw, &profileField); err != nil {
-			return fmt.Errorf("parse dsh.profile: %w", err)
-		}
-	}
-	if profileField == nil {
-		profileField = map[string]json.RawMessage{}
-	}
-	preserve := map[string]bool{}
-	for name, spec := range deps {
-		kind := profile.Classify(name, spec, dir).Kind
-		if kind == model.SourceLocal || kind == model.SourceLocalRemote || !cfg.IsManagedFor("dsh", name) {
-			preserve[name] = true
-		}
-	}
-	for name, spec := range dev {
-		kind := profile.Classify(name, spec, dir).Kind
-		if kind == model.SourceLocal || kind == model.SourceLocalRemote || !cfg.IsManagedFor("dsh", name) {
-			preserve[name] = true
-		}
-	}
-	seen := map[string]bool{}
-	bundles := make([]string, 0, len(remote)+len(preserve))
-	for _, name := range remote {
-		if !seen[name] {
-			bundles = append(bundles, name)
-			seen[name] = true
-		}
-	}
-	// Keep local/unmanaged bundle entries that are still declared.
-	if raw, ok := profileField["bundles"]; ok {
-		var current []string
-		if err := json.Unmarshal(raw, &current); err == nil {
-			for _, name := range current {
-				if preserve[name] && !seen[name] {
-					bundles = append(bundles, name)
-					seen[name] = true
-				}
-			}
-		}
-	}
-	profileField["bundles"] = mustMarshal(bundles)
-	dsh["profile"] = mustMarshal(profileField)
-	root["dsh"] = mustMarshal(dsh)
-	return nil
-}
-
-func applyPi(cfg config.Resolved, remote *PiState) error {
-	path := filepath.Join(cfg.PiHome, "settings.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
-	}
-	var current []json.RawMessage
-	if raw, ok := root["packages"]; ok {
-		if err := json.Unmarshal(raw, &current); err != nil {
-			return fmt.Errorf("parse Pi packages: %w", err)
-		}
-	}
-	remoteByName := make(map[string]Package, len(remote.Packages))
-	for _, pkg := range remote.Packages {
-		remoteByName[pkg.Name] = pkg
-	}
-	used := map[string]bool{}
-	entries := make([]json.RawMessage, 0, len(current)+len(remote.Packages))
-	for _, raw := range current {
-		source, err := packageSource(raw)
-		if err != nil {
-			return err
-		}
-		name := piPackageName(source)
-		kind := classifyPiSource(source, cfg.PiHome)
-		if kind == model.SourceLocal || kind == model.SourceLocalRemote || !cfg.IsManagedFor("pi", name) {
-			entries = append(entries, raw)
-			continue
-		}
-		if pkg, ok := remoteByName[name]; ok {
-			entries = append(entries, rawForPackage(pkg))
-			used[name] = true
-		}
-	}
-	for _, pkg := range remote.Packages {
-		if !used[pkg.Name] {
-			entries = append(entries, rawForPackage(pkg))
-		}
-	}
-	root["packages"] = mustMarshal(entries)
-	return writeJSONFile(path, root)
-}
-
-func rawForPackage(pkg Package) json.RawMessage {
-	if len(pkg.Raw) > 0 {
-		return pkg.Raw
-	}
-	data, _ := json.Marshal(pkg.Source)
-	return data
-}
-
-func stringMap(raw json.RawMessage) map[string]string {
-	if len(raw) == 0 {
-		return nil
-	}
-	var values map[string]string
-	if err := json.Unmarshal(raw, &values); err != nil {
-		return nil
-	}
-	return values
-}
-
-func mustMarshal(value any) json.RawMessage {
-	data, err := json.Marshal(value)
-	if err != nil {
-		panic(err)
-	}
-	return data
-}
-
-func writeJSONFile(path string, root map[string]json.RawMessage) error {
-	data, err := json.MarshalIndent(root, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	tmp := path + ".dshpm-tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// Status lists managed plugins and whether each belongs to the remote set.
-func Status(cfg config.Resolved, profileName, agent string) ([]StatusRow, error) {
-	if agent == "" {
-		agent = "all"
-	}
-	var rows []StatusRow
-	if agent == "all" || agent == "dsh" {
-		name, err := cfg.ResolveProfileName(profileName)
-		if err != nil {
-			return nil, err
-		}
-		p, err := profile.Load(cfg.DSHHome, name)
-		if err != nil {
-			return nil, err
-		}
-		for _, plugin := range p.Plugins() {
-			managed := cfg.IsManagedFor("dsh", plugin.Name)
-			sync := "local"
-			if managed && plugin.Kind != model.SourceLocal && plugin.Kind != model.SourceLocalRemote {
-				sync = "remote"
-			}
-			rows = append(rows, StatusRow{Agent: "dsh", Name: plugin.Name, Kind: string(plugin.Kind), Managed: managed, Sync: sync, Spec: plugin.Spec})
-		}
-	}
-	if agent == "all" || agent == "pi" {
-		entries, err := readPiEntries(cfg.PiHome)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			managed := cfg.IsManagedFor("pi", entry.Name)
-			sync := "local"
-			if managed && entry.Kind != model.SourceLocal && entry.Kind != model.SourceLocalRemote {
-				sync = "remote"
-			}
-			rows = append(rows, StatusRow{Agent: "pi", Name: entry.Name, Kind: string(entry.Kind), Managed: managed, Sync: sync, Spec: entry.Source})
-		}
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Agent != rows[j].Agent {
-			return rows[i].Agent < rows[j].Agent
-		}
-		return rows[i].Name < rows[j].Name
-	})
-	return rows, nil
 }
 
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
-// GitHub stores one state file in a private repository.
+// GitHub stores the configuration file tree in a private repository.
 type GitHub struct {
 	GH       string
 	Git      string
@@ -756,33 +244,243 @@ func (g GitHub) EnsureRepo(ctx context.Context) error {
 	return nil
 }
 
-// Push writes the state into the repository and commits/pushes it.
-func (g GitHub) Push(ctx context.Context, state *State) error {
-	if err := g.EnsureRepo(ctx); err != nil {
-		return err
+// Push uploads the local configuration tree into the repository. The managed
+// subtrees (profiles/, pi/) are rebuilt from scratch on every push so the
+// repository always mirrors local configuration; files that disappeared
+// locally are removed. The retired dshpm-state.json is cleaned up in the
+// same commit.
+func (g GitHub) Push(ctx context.Context, cfg config.Resolved, agent string) ([]ConfigFile, error) {
+	sources, err := collectConfigSources(cfg, agent)
+	if err != nil {
+		return nil, err
 	}
-	dir := g.dir()
-	if err := WriteState(filepath.Join(dir, stateName), state); err != nil {
-		return err
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no %s configuration files found", agent)
 	}
-	if _, err := g.run(ctx, g.Git, "-C", dir, "add", stateName); err != nil {
-		return err
-	}
-	if _, err := g.run(ctx, g.Git, "-C", dir, "-c", "user.name=dshpm", "-c", "user.email=dshpm@localhost", "commit", "-m", "sync: dshpm plugin state "+state.CreatedAt.Format(time.RFC3339)); err != nil {
-		if !strings.Contains(err.Error(), "nothing to commit") && !strings.Contains(err.Error(), "working tree clean") {
-			return err
-		}
-	}
-	if _, err := g.run(ctx, g.Git, "-C", dir, "push", "-u", "origin", "HEAD:"+g.Branch); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Pull fetches and reads the repository state.
-func (g GitHub) Pull(ctx context.Context) (*State, error) {
 	if err := g.EnsureRepo(ctx); err != nil {
 		return nil, err
 	}
-	return ReadState(filepath.Join(g.dir(), stateName))
+	dir := g.dir()
+	for _, name := range []string{profileDirName, piDirName} {
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return nil, err
+		}
+	}
+	_ = os.Remove(filepath.Join(dir, legacyStateName))
+	entries := make([]ConfigFile, 0, len(sources))
+	for _, source := range sources {
+		data, err := os.ReadFile(source.localPath)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256(data)
+		entry := source.entry
+		entry.Size = int64(len(data))
+		entry.SHA256 = hex.EncodeToString(sum[:])
+		target := filepath.Join(dir, repoRelPath(entry))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if _, err := g.run(ctx, g.Git, "-C", dir, "add", "-A"); err != nil {
+		return nil, err
+	}
+	message := "sync: dshpm config " + time.Now().Format(time.RFC3339)
+	if _, err := g.run(ctx, g.Git, "-C", dir, "-c", "user.name=dshpm", "-c", "user.email=dshpm@localhost", "commit", "-m", message); err != nil {
+		if !strings.Contains(err.Error(), "nothing to commit") && !strings.Contains(err.Error(), "working tree clean") {
+			return nil, err
+		}
+	}
+	if _, err := g.run(ctx, g.Git, "-C", dir, "push", "-u", "origin", "HEAD:"+g.Branch); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+// Fetch refreshes the repository clone and returns the backed-up
+// configuration files.
+func (g GitHub) Fetch(ctx context.Context, agent string) ([]ConfigFile, error) {
+	if err := g.EnsureRepo(ctx); err != nil {
+		return nil, err
+	}
+	return readBackupFiles(g.dir(), agent)
+}
+
+// readBackupFiles walks the repository clone and collects the tracked
+// configuration entries. Missing subtrees yield an empty list.
+func readBackupFiles(dir, agent string) ([]ConfigFile, error) {
+	if agent == "" {
+		agent = "all"
+	}
+	if agent != "all" && agent != "dsh" && agent != "pi" {
+		return nil, fmt.Errorf("unknown agent %q (want all, dsh, or pi)", agent)
+	}
+	var entries []ConfigFile
+	if agent == "all" || agent == "dsh" {
+		root := filepath.Join(dir, profileDirName)
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			parts := strings.SplitN(filepath.ToSlash(rel), "/", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				return nil // stray file directly under profiles/
+			}
+			sum, size, err := hashFile(path)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, ConfigFile{Agent: "dsh", Profile: parts[0], Path: parts[1], Size: size, SHA256: sum})
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if agent == "all" || agent == "pi" {
+		root := filepath.Join(dir, piDirName)
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			sum, size, err := hashFile(path)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, ConfigFile{Agent: "pi", Path: filepath.ToSlash(rel), Size: size, SHA256: sum})
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if a.Agent != b.Agent {
+			return a.Agent < b.Agent
+		}
+		if a.Profile != b.Profile {
+			return a.Profile < b.Profile
+		}
+		return a.Path < b.Path
+	})
+	return entries, nil
+}
+
+func hashFile(path string) (string, int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), int64(len(data)), nil
+}
+
+// Plan compares repository files with local configuration without changing
+// anything. Local files absent from the repository are left untouched.
+func Plan(cfg config.Resolved, agent string, files []ConfigFile) ([]ConfigChange, error) {
+	changes := make([]ConfigChange, 0, len(files))
+	for _, entry := range files {
+		target := localTargetPath(cfg, entry)
+		status := "add"
+		if data, err := os.ReadFile(target); err == nil {
+			sum := sha256.Sum256(data)
+			status = "update"
+			if hex.EncodeToString(sum[:]) == entry.SHA256 {
+				status = "same"
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		changes = append(changes, ConfigChange{ConfigFile: entry, Target: target, Status: status})
+	}
+	return changes, nil
+}
+
+// Apply restores repository files into local configuration after preserving
+// the existing files in a timestamped backup directory. Files that already
+// match the repository are skipped; local files absent from the repository
+// are never deleted, so restoring never removes anything.
+func (g GitHub) Apply(ctx context.Context, cfg config.Resolved, agent string) ([]ConfigChange, string, error) {
+	files, err := g.Fetch(ctx, agent)
+	if err != nil {
+		return nil, "", err
+	}
+	changes, err := Plan(cfg, agent, files)
+	if err != nil {
+		return nil, "", err
+	}
+	backupDir, err := applyConfigChanges(g.dir(), cfg, changes)
+	if err != nil {
+		return nil, "", err
+	}
+	return changes, backupDir, nil
+}
+
+// applyConfigChanges writes the changed repository files into local
+// configuration, backing up existing files first. Files that already match
+// the repository are skipped.
+func applyConfigChanges(repoDir string, cfg config.Resolved, changes []ConfigChange) (string, error) {
+	backupDir := filepath.Join(cfg.BackupDir, "restore-"+time.Now().Format("20060102-150405"))
+	for _, change := range changes {
+		if change.Status == "same" {
+			continue
+		}
+		if data, err := os.ReadFile(change.Target); err == nil {
+			backupPath := filepath.Join(backupDir, filepath.FromSlash(repoRelPath(change.ConfigFile)))
+			if err := os.MkdirAll(filepath.Dir(backupPath), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(backupPath, data, 0o644); err != nil {
+				return "", err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		source := filepath.Join(repoDir, repoRelPath(change.ConfigFile))
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != change.SHA256 {
+			return "", fmt.Errorf("repository file %s: checksum mismatch", repoRelPath(change.ConfigFile))
+		}
+		if err := os.MkdirAll(filepath.Dir(change.Target), 0o755); err != nil {
+			return "", err
+		}
+		tmp := change.Target + ".dshpm-tmp"
+		if err := os.WriteFile(tmp, data, 0o644); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmp, change.Target); err != nil {
+			os.Remove(tmp)
+			return "", err
+		}
+	}
+	return backupDir, nil
 }
